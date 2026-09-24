@@ -1,0 +1,12 @@
+[package]
+name = "nexterm-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nexterm-core = { path = "../core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+libc = { workspace = true }

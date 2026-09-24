@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "crates/cli",
+    "crates/daemon",
+    "crates/core",
+    "crates/ipc",
+    "crates/config",
+    "crates/url-detector",
+    "crates/terminal-adapters",
+    "crates/browser",
+    "crates/terminal-manager",
+]
+# Disposable research prototypes — NOT part of the product build.
+exclude = ["research/gnome-embed-poc", "research/x11-browser-controller", "research/browser-tab-companion-poc"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# Vendored winit 0.29.15 with a 2-line NexTerm patch: winit's XIM
+# focus/destroy paths used `.expect()` on X results, so any BadWindow
+# (routine around reparented/raced windows) killed the daemon. The patch
+# logs-and-continues instead. See vendor/winit/README.nexterm.md.
+# Upstream: https://github.com/rust-windowing/winit (revisit on upgrade).
+[patch.crates-io]
+winit = { path = "vendor/winit" }
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+toml = { version = "0.8", features = ["parse", "display"] }
+libc = "0.2"
+regex = "1.11"

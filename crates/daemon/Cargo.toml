@@ -1,0 +1,25 @@
+[package]
+name = "nexterm-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nexterm-daemon"
+path = "src/main.rs"
+
+[dependencies]
+nexterm-core = { path = "../core" }
+nexterm-ipc = { path = "../ipc" }
+nexterm-config = { path = "../config" }
+nexterm-terminal-adapters = { path = "../terminal-adapters" }
+nexterm-browser = { path = "../browser" }
+nexterm-terminal-manager = { path = "../terminal-manager" }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+# Only for the EventLoopProxy type shared with the IPC thread; the event loop
+# itself is created and run inside nexterm-browser.
+winit = "0.29"
+x11rb = "0.13"
+libc = { workspace = true }
+chrono = "0.4"

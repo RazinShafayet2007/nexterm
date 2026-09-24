@@ -1,0 +1,15 @@
+[package]
+name = "nexterm-terminal-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Production terminal integration (Mission 3): X11 observation of GNOME
+# Terminal windows (titles/geometry/state) + AT-SPI snapshots (frames, tab
+# selection, exact content rects). Read-only, no cooperation needed, degrades
+# gracefully when AT-SPI is unavailable.
+
+[dependencies]
+anyhow = { workspace = true }
+x11rb = { version = "0.13", features = ["xtest"] }
+zbus = { version = "5", features = ["blocking"] }

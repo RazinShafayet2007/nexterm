@@ -1,0 +1,21 @@
+[package]
+name = "nexterm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nexterm"
+path = "src/main.rs"
+
+[dependencies]
+nexterm-core = { path = "../core" }
+nexterm-ipc = { path = "../ipc" }
+nexterm-config = { path = "../config" }
+nexterm-terminal-adapters = { path = "../terminal-adapters" }
+nexterm-terminal-manager = { path = "../terminal-manager" }
+clap = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+libc = { workspace = true }
+x11rb = "0.13"

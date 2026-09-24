@@ -1,0 +1,20 @@
+[package]
+name = "browser-tab-companion-poc"
+version = "0.1.0"
+edition = "2021"
+
+# DISPOSABLE RESEARCH PROTOTYPE (Mission F/H). Not part of NexTerm.
+# Browser-tab companion: a placeholder SHELL tab (marker title) in the live
+# GNOME Terminal is associated with a real wry browser window. The browser
+# is visible/focused/following only while its marker tab is the active tab
+# of a visible terminal window. Title tracking via X PropertyNotify;
+# geometry via StructureNotify; all foreign ops transient and restored.
+
+[dependencies]
+wry = "=0.45.0"
+winit = "0.29"
+gtk = "0.18"
+x11rb = { version = "0.13", features = ["xtest"] }
+raw-window-handle = "0.6"
+x11-dl = "2.21"
+libc = "0.2"

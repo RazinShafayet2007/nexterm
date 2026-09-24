@@ -1,0 +1,17 @@
+[package]
+name = "x11-browser-controller"
+version = "0.1.0"
+edition = "2021"
+
+# DISPOSABLE RESEARCH PROTOTYPE (Mission B/C). Not part of NexTerm.
+# X11 controller: locate/track/move/hide/show/focus a real wry browser
+# window relative to the live GNOME Terminal window. Read-only tracking
+# needs no cooperation; foreign move/resize/focus are transient test ops.
+
+[dependencies]
+wry = "=0.45.0"
+winit = "0.29"
+gtk = "0.18"
+x11rb = { version = "0.13", features = ["xtest"] }
+raw-window-handle = "0.6"
+x11-dl = "2.21"

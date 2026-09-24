@@ -1,0 +1,20 @@
+[package]
+name = "nexterm-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nexterm-core = { path = "../core" }
+nexterm-url-detector = { path = "../url-detector" }
+# Pinned: last wry line targeting WebKitGTK 4.1 + libsoup3 on Ubuntu 22.04
+# (WebKitGTK 2.50 runtime present; dev files via scripts/sysroot-webkit.sh).
+wry = "=0.45.0"
+# Windowing + GTK pump for the Linux/WebKitGTK backend (see wry docs:
+# "Platform Considerations" — caller inits gtk and pumps main_iteration).
+winit = "0.29"
+gtk = "0.18"
+x11-dl = "2.21"
+# X ops for OUR OWN windows only (reparent/map/focus/WM_CLASS). Foreign
+# windows are observed by terminal-manager, never touched from here.
+x11rb = "0.13"

@@ -1,0 +1,16 @@
+[package]
+name = "gnome-embed-poc"
+version = "0.1.0"
+edition = "2021"
+
+# DISPOSABLE RESEARCH PROTOTYPE. Not part of the NexTerm product, not in the
+# workspace, not shipped. Answers one question: can a real WebKitGTK webview
+# be embedded into the existing GNOME Terminal window/tab via X11?
+
+[dependencies]
+wry = "=0.45.0"
+winit = "0.29"
+gtk = "0.18"
+x11rb = { version = "0.13", features = ["xtest"] }
+raw-window-handle = "0.6"
+x11-dl = "2.21"
