@@ -144,6 +144,25 @@ the marker, then the daemon attaches by itself and the session becomes
 `Visible` — measured live: it recovered automatically the moment the duplicate
 was killed. Rename or close the impostor to clear it faster.
 
+## A `WebKitNetworkProcess` is running but I have no sessions
+
+Expected, not a leak. WebKitGTK initializes *inside the daemon* the first time a
+surface is created, and a shared `WebKitNetworkProcess` stays alive as a child
+of `nexterm-daemon` after every session is closed — it is the engine kept warm
+for the next `open`. Measured while idle: **0.00%** of a core, ~85 MB RSS. The
+daemon's own memory likewise stays WebKit-initialized (~147 MB) rather than
+returning to its fresh ~45 MB.
+
+It goes away with the daemon, and only then:
+
+```bash
+nexterm stop                        # no nexterm-daemon / WebKit* process remains
+python3 scripts/idle-cost.py 30     # show exactly what is resident, and its CPU
+```
+
+`nexterm stop` closes NexTerm's sessions, not your shell — and a later `open`
+recreates the network process, so stopping is the only way to release it.
+
 ## Logs
 
 `nexterm logs [-n N]` tails `~/.local/share/nexterm/nexterm.log`. Every

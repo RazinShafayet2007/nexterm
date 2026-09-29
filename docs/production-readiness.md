@@ -16,6 +16,7 @@
 | Pane-host adapters (Kitty) | new (Priority 7) | `terminal-adapters`: `PaneHost` trait + Kitty `kitten @` builder/parser, XID association, injectable runner |
 | Latency instrumentation | new (Priority 8) | `core::SessionTiming` + `TermSnapshot.updated_at` + tracked-attach/visible milestones; `nexterm list` LATENCY column; `[LATENCY]` reaction logs; event-driven X11 wait + on-demand AT-SPI re-measure + measurement freshness gate (Priority E) |
 | Daemon IPC integration test | new | `crates/daemon/tests/ipc_smoke.rs`: real binary, real socket, headless, covers ping/status/0600/unknown-cmd/clean shutdown |
+| Lifecycle decision tests | new | `nexterm-daemon` tests driving the real `tick`/`confirm_lingering`: a normal close warns about nothing, a held tab warns exactly once, hides need 3 consecutive misses, a collision warns once per session and never attaches to a guess |
 
 ## Assumptions still standing on evidence, not proof
 
@@ -72,7 +73,12 @@ Also hardened:
   close; the split fixes that.
 - **AT-SPI state decoding** is proven end-to-end (`scripts/verify-atspi-state.py`:
   constants vs. the installed header plus a live multi-role walk), not
-  spot-checked.
+  spot-checked. The constants half now also runs in CI
+  (`--constants-only`), where a drifting libatspi index fails the build.
+- **The decisions themselves**, not just their parts, are tested: normal close
+  vs held tab (including the log, which is what a user sees), hide hysteresis,
+  and one-warning-per-collision. What remains local-only is the *attach* step
+  and the `Visible` transition they lead to, both of which are GUI events.
 
 Still standing (documented, not fixed): the "no concurrent title" path in the
 *unmanaged* direction — a user creating a window whose title collides is not
@@ -131,13 +137,23 @@ AT-SPI *detection* likely survives there; every surface mechanism does not.
 
 ## Idle cost (Priority F)
 
-Measured per-thread on the reference host (GNOME Terminal 3.44, X11, WebKitGTK
-2.50, debug build), daemon idle:
+Measured on the reference host (GNOME Terminal 3.44, X11, WebKitGTK 2.50,
+debug build). Idle is reported per **process set**, because a daemon is not one
+process; reproduce any row with `python3 scripts/idle-cost.py [seconds]`.
+
+| State (no sessions open unless stated) | Resident processes | RSS | CPU (one core) | Sample |
+|---|---|---|---|---|
+| daemon stopped | — | — | **0%** | — |
+| daemon up, **no surface ever opened** | `nexterm-daemon` | 45 MB | **0.82%** | 60 s, 2 baseline walks |
+| daemon up, **surface opened earlier, now closed** | `nexterm-daemon` + `WebKitNetworkProcess` | 147 MB + 85 MB | **1.20%** | 30 s |
+| one session open | daemon + one WebKit web process + `WebKitNetworkProcess` + the marker tab's `sleep infinity` | — | **~4.0%** | prior run |
+
+Per-thread, before/after the fixes:
 
 | Thread | Before | After |
 |---|---|---|
 | `nexterm-x11` (tracking) | 24% of a core | **0.3-0.5%** |
-| whole daemon, no session | 33% of a core | **~1.2%** |
+| whole daemon, no session | 33% of a core | **0.82-1.20%** (see above) |
 | whole daemon, one session open | n/a (not separated) | **~4.0%** |
 
 Where the cost actually was (measured, not assumed): discovery probed
@@ -151,10 +167,27 @@ The remaining idle cost was the AT-SPI/zbus walk (~4-5% at a 2 s poll, ~3-4% at
 5 s), which is why the baseline is now **adaptive**: 30 s while no session is
 live and 5 s while one is (`ATSPI_IDLE_POLL` / `ATSPI_BASELINE_POLL`), with
 invalidation still driven on demand by the X11 thread. That took the no-session
-idle from ~7% to ~1.2% of a core without giving up a fresh measurement when a
-session appears. Verified on the reference host by the counters `nexterm
-status` prints: 2 walks/65 s idle vs 13 walks/65 s with a session open, and
-`AT-SPI: baseline poll 30 s` / `5 s` respectively.
+idle from ~7% to **0.82%** (fresh daemon) or **1.20%** (WebKit already warm,
+below) without giving up a fresh measurement when a session appears. Verified on
+the reference host by the counters `nexterm status` prints: 2 walks/65 s idle vs
+13 walks/65 s with a session open, and `AT-SPI: baseline poll 30 s` / `5 s`
+respectively.
+
+**No sessions does not mean no processes.** WebKitGTK is initialized *inside the
+daemon process* the first time a surface is created, and it does not fully
+unwind when the last surface is destroyed: a shared `WebKitNetworkProcess`
+stays alive as a **child of the daemon** until `nexterm stop`, and the daemon's
+own RSS stays at the WebKit-initialized ~147 MB instead of dropping back to
+~45 MB. Measured while idle: the network process contributes **0.00%** of a core
+(~85 MB), so it costs memory, not CPU — but a daemon that has been *used* has a
+floor of two processes, not one. `nexterm stop` is clean: checked immediately
+after, no `nexterm-daemon`, `WebKitNetworkProcess` or `WebKitWebProcess`
+remains.
+
+The first ~60 s after `nexterm start` measure higher than the steady state
+(2.33% over 30 s was observed) because startup walks and session restore run
+inside the sample window; let it settle before comparing, which is how the
+0.82% row above was taken.
 
 ## Latency instrumentation (Priority 8)
 
@@ -252,8 +285,10 @@ until the next 2 s AT-SPI sample landed.
 
 ```bash
 export PKG_CONFIG_PATH="$HOME/.local/share/nexterm-sysroot/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
-cargo test --workspace            # 117 tests (116 unit + 1 daemon integration), no display needed
+cargo test --workspace            # 123 tests (122 unit + 1 daemon integration), no display needed
 python3 scripts/verify-atspi-state.py   # AT-SPI constants vs. installed header + live decode (exit 0 = pass)
+python3 scripts/verify-atspi-state.py --constants-only   # the half CI runs (no desktop needed)
+python3 scripts/idle-cost.py 30      # idle CPU + exactly which processes are resident (any state)
 cargo run -p nexterm-terminal-manager --example atspi_dump   # live AT-SPI proof
 ./target/debug/nexterm start && ./target/debug/nexterm doctor
 ./target/debug/nexterm open http://localhost:5173/ && ./target/debug/nexterm list
@@ -327,8 +362,10 @@ cargo test -p nexterm-daemon --test ipc_smoke   # real daemon + real socket, hea
 10. ~~Idle cost / GUI pump.~~ **DONE.** The pump blocks when no window exists,
    the X11 tracker is event-driven with `_NET_CLIENT_LIST` discovery and cached
    atoms, and the zero-timeout spin that made it 90% of a core is fixed
-   (33% → ~7% total idle, tracker 24% → 0.3%; now ~1.2% with the adaptive
-   AT-SPI baseline, item 13). The zombie `gnome-terminal` client per open is
+   (33% → ~7% total idle, tracker 24% → 0.3%; now **0.82%** with the adaptive
+   AT-SPI baseline, item 13, or **1.20%** once WebKit has been initialized —
+   see the per-process-set table above). The zombie `gnome-terminal` client per
+   open is
    reaped too. Remaining: supervising the AT-SPI walk against a wedged registry
    (see the bug above).
 11. ~~Supervise the AT-SPI walk.~~ **DONE.** `AtspiWalker` bounds every walk
@@ -349,7 +386,9 @@ cargo test -p nexterm-daemon --test ipc_smoke   # real daemon + real socket, hea
    5 s sweep while a session is live and 30 s with none, publishing
    `atspi_poll_ms`/`atspi_walks` for `nexterm status`. `wait_for_wake` checks the
    demand flag before parking so an on-demand request cannot be lost across a
-   long idle interval. Live: no-session idle **~1.2%** of a core (was ~7%),
-   a session open ~4.0%; walk rate 2/65 s idle vs 13/65 s with a session, and
+   long idle interval. Live: no-session idle **0.82%** of a core fresh and
+   **1.20%** with WebKit warm (was ~7%; the extra process is
+   `WebKitNetworkProcess`, see above), a session open ~4.0%; walk rate 2/65 s
+   idle vs 13/65 s with a session, and
    the first `open` out of the idle state was still placed `[measured]` within
    ~1 s.

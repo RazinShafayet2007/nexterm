@@ -32,8 +32,16 @@ Two independent checks:
 
 Read-only: it only calls `GetChildren` / `GetState` / `GetRole` / property Get.
 
-Usage:  python3 scripts/verify-atspi-state.py
-Exit:   0 = all checks passed, 1 = a mismatch (details printed).
+Usage:  python3 scripts/verify-atspi-state.py [--constants-only]
+
+        `--constants-only` stops after section 1, which is the half that CI can
+        run: it compares the Rust `SHOWING`/`VISIBLE` indices against the
+        installed libatspi header, needing only the header and the source file.
+        Section 2 walks a live accessibility tree and is therefore local-only
+        (a CI runner has no desktop session or a11y bus).
+
+Exit:   0 = all checks passed, 1 = a mismatch (details printed), 2 = cannot run
+        (no python3-gi, or no atspi-constants.h to compare against).
 """
 
 import re
@@ -195,6 +203,14 @@ def role_of(conn, dest, path, role_names):
 
 
 def main():
+    argv = sys.argv[1:]
+    unknown = [a for a in argv if a != "--constants-only"]
+    if unknown:
+        print(f"unknown argument(s): {' '.join(unknown)}")
+        print("usage: verify-atspi-state.py [--constants-only]")
+        return 2
+    constants_only = "--constants-only" in argv
+
     print("== 1. constants vs the installed libatspi ==")
     hdr, hdr_text = header_path()
     print(f"  header: {hdr}")
@@ -213,6 +229,13 @@ def main():
           f"rust VISIBLE {rust['ATSPI_STATE_VISIBLE']} == header {states['ATSPI_STATE_VISIBLE']}")
     showing_bit = states["ATSPI_STATE_SHOWING"]
     visible_bit = states["ATSPI_STATE_VISIBLE"]
+
+    if constants_only:
+        print(
+            "\n(constants-only: section 2 walks the live tree and needs a desktop\n"
+            " session with an accessibility bus — run it locally, not in CI.)"
+        )
+        return report()
 
     print("== 2. live decode across object classes ==")
     conn, addr = a11y_connection()

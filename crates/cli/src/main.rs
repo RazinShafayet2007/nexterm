@@ -1049,6 +1049,38 @@ fn cmd_handler_status() -> Result<()> {
     Ok(())
 }
 
+/// The pre-enable http/https handlers, as written to the restore file.
+fn handler_backup_value(http: &str, https: &str) -> serde_json::Value {
+    serde_json::json!({ "http": http, "https": https })
+}
+
+/// Read a restore file back. Anything unusable — corrupt JSON, missing keys,
+/// non-strings — degrades to "no previous handler": `disable` then removes
+/// NexTerm's entry instead of aborting and leaving a stray handler behind.
+fn parse_handler_backup(text: &str) -> (String, String) {
+    let v: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+    let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    (get("http"), get("https"))
+}
+
+/// Write the restore file only if it is not there yet.
+///
+/// The backup holds the handlers to put back on `disable`, so it must be
+/// written **once**: re-running `enable` while NexTerm is already the handler
+/// would otherwise record NexTerm itself as "the previous handler", and
+/// `disable` would restore nothing. Returns whether it wrote.
+fn write_backup_once(path: &Path, value: &serde_json::Value) -> Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(value)?)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
+}
+
 fn cmd_handler_enable() -> Result<()> {
     if Command::new("xdg-mime").arg("--version").output().is_err() {
         anyhow::bail!("`xdg-mime` not found; cannot register a URL handler on this system");
@@ -1057,18 +1089,16 @@ fn cmd_handler_enable() -> Result<()> {
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let desktop = dir.join(HANDLER_DESKTOP_FILE);
 
-    // Save the current handlers once — never clobber an existing backup.
+    // Save the current handlers once — never clobber an existing backup. The
+    // queries are skipped entirely when a backup exists, so a re-enable does
+    // not even shell out to `xdg-mime` twice.
     let restore = handler_restore_path();
     if !restore.exists() {
-        let prev = serde_json::json!({
-            "http": xdg_mime_default("x-scheme-handler/http").unwrap_or_default(),
-            "https": xdg_mime_default("x-scheme-handler/https").unwrap_or_default(),
-        });
-        if let Some(parent) = restore.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        std::fs::write(&restore, serde_json::to_vec_pretty(&prev)?)
-            .with_context(|| format!("write {}", restore.display()))?;
+        let value = handler_backup_value(
+            &xdg_mime_default("x-scheme-handler/http").unwrap_or_default(),
+            &xdg_mime_default("x-scheme-handler/https").unwrap_or_default(),
+        );
+        write_backup_once(&restore, &value)?;
     }
 
     let exe = std::env::current_exe().context("resolve the nexterm binary path")?;
@@ -1093,12 +1123,9 @@ fn cmd_handler_disable() -> Result<()> {
     let restore = handler_restore_path();
 
     if restore.exists() {
-        let v: serde_json::Value = std::fs::read_to_string(&restore)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
+        let (http, https) = std::fs::read_to_string(&restore)
+            .map(|t| parse_handler_backup(&t))
             .unwrap_or_default();
-        let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let (http, https) = (get("http"), get("https"));
         if !http.is_empty() {
             xdg_mime_set_default(&http, &["x-scheme-handler/http"]).ok();
         }
@@ -1299,5 +1326,72 @@ mod tests {
         assert_eq!(format_timing(&json!({"since_open_ms": 500})), "0.5s");
         // No timing object at all (old daemon): dash.
         assert_eq!(format_timing(&json!({})), "-");
+    }
+
+    /// `handler enable` is the one command that changes system state, and
+    /// `disable` is the only way back — so the save/restore pair is a
+    /// round-trip, not two independent writes. Covered here rather than by
+    /// running the real thing, which would take over this machine's handler.
+    #[test]
+    fn handler_backup_round_trips_and_degrades_safely() {
+        let text =
+            serde_json::to_string(&handler_backup_value("firefox.desktop", "chromium.desktop"))
+                .unwrap();
+        assert_eq!(
+            parse_handler_backup(&text),
+            (
+                "firefox.desktop".to_string(),
+                "chromium.desktop".to_string()
+            ),
+            "what enable saves is what disable restores"
+        );
+
+        // Nothing was registered before: restore nothing, but still clean up.
+        let text = serde_json::to_string(&handler_backup_value("", "")).unwrap();
+        assert_eq!(parse_handler_backup(&text), (String::new(), String::new()));
+
+        // Corrupt or partial files must not make `disable` abort with NexTerm's
+        // entry still installed: they degrade to "no previous handler".
+        for bad in [
+            "not json at all",
+            "[]",
+            r#"{"http":"firefox.desktop"}"#,
+            r#"{"http":42,"https":null}"#,
+            "",
+        ] {
+            let (http, https) = parse_handler_backup(bad);
+            assert!(http.is_empty() || http == "firefox.desktop", "{bad:?}");
+            assert!(https.is_empty(), "{bad:?} must not invent a handler");
+        }
+    }
+
+    /// The backup must survive a second `enable`: if it were rewritten, it
+    /// would record NexTerm's own entry as "the previous handler" and
+    /// `disable` would restore the hijack instead of undoing it.
+    #[test]
+    fn handler_backup_is_written_once_and_never_clobbered() {
+        let dir = std::env::temp_dir().join(format!("nexterm-handler-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("handler-restore.json");
+
+        let real = handler_backup_value("firefox.desktop", "firefox.desktop");
+        assert!(
+            write_backup_once(&path, &real).unwrap(),
+            "the first enable saves what was really there"
+        );
+
+        let already_ours = handler_backup_value(HANDLER_DESKTOP_FILE, HANDLER_DESKTOP_FILE);
+        assert!(
+            !write_backup_once(&path, &already_ours).unwrap(),
+            "a later enable must not overwrite the backup"
+        );
+        let saved = parse_handler_backup(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(
+            saved,
+            ("firefox.desktop".to_string(), "firefox.desktop".to_string()),
+            "the original handlers survive a re-enable"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

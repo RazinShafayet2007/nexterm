@@ -112,6 +112,15 @@ windows NexTerm uses. This is the X11 security model. Therefore:
 | `~/.local/share/applications/nexterm-url-handler.desktop` | Handler entry | Exists only after `handler enable`. |
 | `$XDG_RUNTIME_DIR/nexterm/nexterm.sock` | IPC socket | Mode `0600`; removed on clean shutdown. |
 
+### 8a. And processes, not just files
+
+While it runs, the daemon also holds long-lived same-user child processes: a
+shared `WebKitNetworkProcess` (created the first time a surface is opened, kept
+after the last session closes — idle at 0.00% of a core), a WebKit web process
+per live surface, and one placeholder `sleep` per open session. The first of
+those is a network-capable process that outlives your sessions, so it is worth
+knowing about; all of them exit with `nexterm stop`.
+
 ## 9. What NexTerm does NOT protect against
 
 - Local processes in the same X11 session (see §6).

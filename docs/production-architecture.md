@@ -147,11 +147,16 @@ Three measurements, all cheap and log/`list`-visible:
 ## 8a. Tracking responsiveness (Priority E)
 
 All three tracking loops no longer poll blindly, and the whole daemon is
-**event-driven at rest** — measured on the reference host, idle with no
-session: process total **~1.2% of one core** (was 33%, then ~7% before the
-adaptive AT-SPI baseline below), of which the X11 tracker is ~0.3-0.5% (was
-24%). Idle with a session open — the AT-SPI baseline back at its responsive
-cadence, plus the GTK/WebKit pump — measures ~4.0% of a core.
+**event-driven at rest** — measured on the reference host, idle with no session:
+process total **0.82% of one core** with a daemon that has never opened a
+surface, and **1.20%** once one has been opened and closed (the delta is the
+shared `WebKitNetworkProcess` that stays resident — see the per-process-set
+table in `production-readiness.md`, "Idle cost"). The X11 tracker is ~0.3-0.5%
+of that (was 24%; the total was 33%, then ~7% before the adaptive AT-SPI
+baseline below). Idle with a session open — the AT-SPI baseline back at its
+responsive cadence, plus the GTK/WebKit pump and a WebKit web process — measures
+~4.0% of a core. Re-measure any of these with
+`python3 scripts/idle-cost.py [seconds]`.
 
 - **GTK/WebKit pump.** With no browser window there is nothing for GTK to
   service, so the event loop blocks (`ControlFlow::Wait`) and a user event

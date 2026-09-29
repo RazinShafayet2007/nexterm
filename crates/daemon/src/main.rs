@@ -2330,7 +2330,17 @@ mod tests {
     /// An `IpcCtx` with no display, no GUI proxy, and all state inside a temp
     /// tree: unit tests must never touch the real session list or log file.
     fn headless_ctx() -> IpcCtx {
-        let dir = std::env::temp_dir().join(format!("nexterm-unit-{}", std::process::id()));
+        headless_ctx_tagged("shared")
+    }
+
+    /// [`headless_ctx`] in a temp directory of its own.
+    ///
+    /// Needed by any test that reads the log back: `cargo test` runs these as
+    /// parallel threads of one process, so a shared temp dir would let one
+    /// test's lines answer another test's question — and the log is the only
+    /// record that a WARN was (or was not) emitted.
+    fn headless_ctx_tagged(tag: &str) -> IpcCtx {
+        let dir = std::env::temp_dir().join(format!("nexterm-unit-{}-{tag}", std::process::id()));
         let paths = NexPaths {
             runtime_dir: dir.clone(),
             data_dir: dir.clone(),
@@ -2935,5 +2945,259 @@ mod tests {
             serde_json::from_value(r.data.expect("status data")).expect("status payload shape");
         assert!(status.running, "a daemon that answers status is running");
         assert_eq!(status.pid, std::process::id());
+    }
+
+    // -----------------------------------------------------------------------
+    // Decisions the daemon makes about a session's *life*, driven through the
+    // real `tick`/`confirm_lingering` paths. The pure helpers each have their
+    // own unit tests; these cover the assembled behaviour (and its log), which
+    // is what a user actually experiences.
+    // -----------------------------------------------------------------------
+
+    /// A mapped, non-hidden terminal window titled `title` — the only shape the
+    /// association rules treat as a host candidate.
+    fn test_window(xid: u32, title: &str) -> nexterm_terminal_manager::TermWindow {
+        nexterm_terminal_manager::TermWindow {
+            xid,
+            title: title.into(),
+            geo: Some((0, 0, 800, 600)),
+            mapped: true,
+            hidden: false,
+        }
+    }
+
+    /// A visible session bound to a placeholder shell. `pid = Some(1 << 30)` is
+    /// "the shell has exited" (never a live pid), which is the instant where a
+    /// normal close and a held-open tab are indistinguishable — so both of those
+    /// scenarios start here.
+    fn session_with_shell(marker: &str, pid: Option<u32>) -> Session {
+        Session::new(
+            SessionInfo {
+                id: 1,
+                url: "http://localhost:5173/".into(),
+                marker: marker.into(),
+                state: SessionState::Visible,
+                host_title: None,
+                timing: None,
+            },
+            pid,
+            0,
+        )
+    }
+
+    fn live_pid() -> u32 {
+        std::process::id()
+    }
+
+    fn log_text(ctx: &IpcCtx) -> String {
+        std::fs::read_to_string(&ctx.paths.log_path).unwrap_or_default()
+    }
+
+    /// `views` as the GUI would report them — session 1 with a live browser
+    /// window. This is not optional dressing: a session the GUI has not
+    /// reported a window for is skipped by the tick entirely (`!has_window →
+    /// continue`, the windowless-fail path owns it), so a decision test that
+    /// passes an empty map asserts nothing at all.
+    fn views_with_window() -> SharedViews {
+        use nexterm_browser::SessionView;
+        Arc::new(Mutex::new(HashMap::from([(
+            1u64,
+            SessionView {
+                url: "http://localhost:5173/".into(),
+                visible: true,
+                has_window: true,
+            },
+        )])))
+    }
+
+    /// The tab went with its shell (the default profile): the session ends and
+    /// there is **nothing** to warn about. An earlier version trusted a stale
+    /// AT-SPI frame here and emitted the held-tab warning moments after an
+    /// ordinary close — this is that bug, pinned.
+    #[test]
+    fn a_normal_close_warns_about_nothing() {
+        let marker = "🌐 localhost:5173";
+        let ctx = headless_ctx_tagged("normal-close");
+        let views = views_with_window();
+        let proxy: Arc<Mutex<Option<GuiProxy>>> = Arc::new(Mutex::new(None));
+        let snap = TermSnapshot {
+            windows: vec![test_window(0x1111, "bash")],
+            ..Default::default()
+        };
+        {
+            let mut sm = ctx.sessions.lock().unwrap();
+            sm.sessions
+                .insert(1, session_with_shell(marker, Some(1 << 30)));
+            sm.tick(&snap, &views, &proxy, false);
+            assert_eq!(
+                sm.sessions.get(&1).map(|s| s.info.state),
+                Some(SessionState::Closed),
+                "a placeholder whose shell exited ends the session"
+            );
+            assert!(
+                read_persisted_sessions(&ctx.paths.sessions_path).is_empty(),
+                "a finished session must not be restored on the next start"
+            );
+            assert_eq!(
+                sm.lingering.len(),
+                1,
+                "the tab question is deferred, not answered, at this instant"
+            );
+
+            // Grace elapses with the tab still gone: it closed with its shell.
+            sm.lingering[0].1 = Instant::now() - LINGER_CONFIRM - Duration::from_secs(1);
+            sm.confirm_lingering(&snap);
+            assert!(sm.lingering.is_empty(), "nothing left to report");
+        }
+        let log = log_text(&ctx);
+        assert!(
+            !log.contains("WARN"),
+            "a normal close must not warn:\n{log}"
+        );
+        assert!(
+            log.contains("placeholder shell exited"),
+            "the close must still say what happened:\n{log}"
+        );
+    }
+
+    /// The tab outlived its shell (a profile with `exit-action=hold`): exactly
+    /// one warning, naming the tab and the cause, and never a second one.
+    #[test]
+    fn a_held_tab_warns_exactly_once() {
+        let marker = "🌐 localhost:5173";
+        let ctx = headless_ctx_tagged("held-tab");
+        let views = views_with_window();
+        let proxy: Arc<Mutex<Option<GuiProxy>>> = Arc::new(Mutex::new(None));
+        // The tab is still on screen after the shell exited.
+        let snap = TermSnapshot {
+            windows: vec![test_window(0x1234, marker)],
+            ..Default::default()
+        };
+        {
+            let mut sm = ctx.sessions.lock().unwrap();
+            sm.sessions
+                .insert(1, session_with_shell(marker, Some(1 << 30)));
+            sm.tick(&snap, &views, &proxy, false);
+            assert_eq!(
+                sm.sessions.get(&1).map(|s| s.info.state),
+                Some(SessionState::Closed),
+                "the session ends with its shell"
+            );
+
+            // Too early: a tab that is merely still closing looks the same.
+            sm.confirm_lingering(&snap);
+            assert_eq!(sm.lingering.len(), 1, "no report inside the grace period");
+            assert!(
+                !log_text(&ctx).contains("WARN"),
+                "nothing may be reported before the grace elapses"
+            );
+
+            // Grace elapsed with the marker still mapped: reported once...
+            sm.lingering[0].1 = Instant::now() - LINGER_CONFIRM - Duration::from_secs(1);
+            sm.confirm_lingering(&snap);
+            assert!(sm.lingering.is_empty(), "a lingering tab is reported once");
+
+            // ...and further ticks must not repeat it: the session is gone, so
+            // nothing re-queues, even though the tab is still on screen.
+            sm.tick(&snap, &views, &proxy, false);
+        }
+        let log = log_text(&ctx);
+        assert_eq!(
+            log.matches("is still open").count(),
+            1,
+            "exactly one held-tab warning, got:\n{log}"
+        );
+        assert!(
+            log.contains("exit-action=hold"),
+            "the warning must name the likely cause:\n{log}"
+        );
+        assert!(
+            log.contains(marker),
+            "the warning must name the tab to close:\n{log}"
+        );
+    }
+
+    /// Hides are debounced, shows are not: two consecutive misses keep the
+    /// surface attached (a title race or a fast manual switch cannot make it
+    /// flash), the third hides it. A single no-host tick hiding instantly is
+    /// what this guards against.
+    #[test]
+    fn hides_need_three_consecutive_misses() {
+        let marker = "🌐 localhost:5173";
+        let ctx = headless_ctx_tagged("hide-hysteresis");
+        let views = views_with_window();
+        let proxy: Arc<Mutex<Option<GuiProxy>>> = Arc::new(Mutex::new(None));
+        // Live placeholder: liveness must not end the session out from under us.
+        let no_marker = TermSnapshot {
+            windows: vec![test_window(0x1111, "bash")],
+            ..Default::default()
+        };
+        let mut sm = ctx.sessions.lock().unwrap();
+        let mut session = session_with_shell(marker, Some(live_pid()));
+        session.last_attach = Some((0x2222, 0, 0, 800, 600));
+        sm.sessions.insert(1, session);
+
+        for expected_misses in 1..=2 {
+            sm.tick(&no_marker, &views, &proxy, false);
+            let s = sm.sessions.get(&1).expect("still attached");
+            assert_eq!(s.misses, expected_misses);
+            assert_eq!(s.hide_count, 0, "must not hide on miss {expected_misses}");
+            assert_ne!(s.info.state, SessionState::Hidden);
+            assert!(s.last_attach.is_some(), "still attached to its tab");
+        }
+
+        sm.tick(&no_marker, &views, &proxy, false);
+        let s = sm.sessions.get(&1).expect("session survives the hide");
+        assert_eq!(s.misses, 3);
+        assert_eq!(s.hide_count, 1, "the third miss hides, exactly once");
+        assert_eq!(s.info.state, SessionState::Hidden);
+        assert!(s.last_attach.is_none(), "a hidden surface holds no anchor");
+    }
+
+    /// A duplicate marker title is reported **once per session**, and while it
+    /// lasts the session is never attached to a guess; a lone matching window
+    /// afterwards is a host again (`misses` resets). The log is the assertion:
+    /// the user sees warnings, not flags.
+    #[test]
+    fn a_collision_warns_once_and_reattaches_when_it_clears() {
+        let marker = "🌐 localhost:5173";
+        let ctx = headless_ctx_tagged("collision");
+        let views = views_with_window();
+        let proxy: Arc<Mutex<Option<GuiProxy>>> = Arc::new(Mutex::new(None));
+        let collision = TermSnapshot {
+            windows: vec![test_window(0xAAAA, marker), test_window(0xBBBB, marker)],
+            ..Default::default()
+        };
+        let mut sm = ctx.sessions.lock().unwrap();
+        let mut session = session_with_shell(marker, Some(live_pid()));
+        session.last_attach = None; // no anchor: `Ambiguous`, not `Sticky`
+        sm.sessions.insert(1, session);
+
+        for _ in 0..3 {
+            sm.tick(&collision, &views, &proxy, false);
+            let s = sm.sessions.get(&1).expect("not closed by the collision");
+            assert!(s.ambig_warned, "the collision is flagged");
+            assert!(s.last_attach.is_none(), "never attach to a guessed window");
+        }
+        let log = log_text(&ctx);
+        assert_eq!(
+            log.matches("is shown by more than one window").count(),
+            1,
+            "one warning per session, however many ticks collide:\n{log}"
+        );
+
+        // One matching window => a host again: the tick takes the attach path
+        // and the hide countdown restarts. (The attach itself is a GUI event,
+        // so it is exercised against a live desktop, not here.)
+        let resolved = TermSnapshot {
+            windows: vec![test_window(0xAAAA, marker)],
+            ..Default::default()
+        };
+        sm.tick(&resolved, &views, &proxy, false);
+        assert_eq!(
+            sm.sessions.get(&1).map(|s| s.misses),
+            Some(0),
+            "a unique host restarts the hide countdown"
+        );
     }
 }

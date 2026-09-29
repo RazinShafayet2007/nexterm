@@ -17,12 +17,14 @@ jobs:
 
       # The browser crate links WebKitGTK; CI needs the compile-time files.
       # (On a dev box without root, scripts/sysroot-webkit.sh stages these
-      # user-locally instead — see README.md.)
+      # user-locally instead — see README.md.) libatspi2.0-dev + python3-gi are
+      # for the AT-SPI constants check below.
       - name: Install WebKitGTK build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libwebkit2gtk-4.1-dev libsoup-3.0-dev
+            build-essential pkg-config libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libatspi2.0-dev python3-gi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -36,6 +38,17 @@ jobs:
       # landed in the same change that made this step fail the build).
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      # Our SHOWING/VISIBLE indices are numbers (25/30) read straight out of
+      # libatspi; a wrong one would silently corrupt every visibility decision,
+      # and this is the cheapest place to notice a distro drifting from them.
+      # Only the constants half runs here: the live-tree half needs a desktop
+      # session with an a11y bus. A skip (exit 2, no header or no python3-gi)
+      # deliberately fails the step too — the packages installed above are meant
+      # to make this check runnable, so a skip means the setup is broken, not
+      # that the check passed.
+      - name: Check AT-SPI state constants
+        run: python3 scripts/verify-atspi-state.py --constants-only
 
       - name: Build
         run: cargo build --workspace --all-targets

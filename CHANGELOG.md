@@ -64,6 +64,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   object with the production rule (exit 0 = pass, 2 = skipped, 1 = fail).
   Latest run: 548 objects, `SHOWING ⇒ VISIBLE` for all, `SHOWING` on 12 object
   classes, and `VISIBLE`-without-`SHOWING` observed.
+- **Decision tests for the session lifecycle** (`nexterm-daemon`, +4): a normal
+  close warns about nothing and is not persisted for restore; a tab that
+  outlives its shell warns exactly once, naming the tab and the
+  `exit-action=hold` cause; hides need three consecutive misses (two keep the
+  surface attached, which is what stops ms-flashing); a duplicate-marker
+  collision warns once per session and never attaches to a guess. They drive
+  the real `tick`/`confirm_lingering` paths and read the log back to assert it —
+  each in a temp dir of its own, because `cargo test` runs them as parallel
+  threads of one process and the log is the only record that a warning was (or
+  was not) emitted.
+- **URL-handler save/restore as a tested round-trip** (`nexterm-cli`, +2):
+  `handler_backup_value`, `parse_handler_backup` and `write_backup_once` are
+  split out of `handler enable|disable` and covered — a corrupt or partial
+  restore file degrades to "no previous handler" instead of aborting `disable`
+  with NexTerm's entry still installed, and a second `enable` provably cannot
+  overwrite the backup with NexTerm's own entry (which would make `disable`
+  restore the hijack). The system handler itself is never touched by the tests.
+- **CI checks the AT-SPI state constants**: the verifier gained
+  `--constants-only`, and the workflow installs `libatspi2.0-dev` + `python3-gi`
+  and runs it, so a distro whose libatspi indices drift from our
+  `SHOWING`/`VISIBLE` (25/30) fails the build instead of silently misreporting
+  visibility. The live-tree half stays a local check — a runner has no
+  accessibility bus.
 - **Release hygiene**: `LICENSE-MIT` + `LICENSE-APACHE`, this changelog, a CI
   workflow, and `repository`/`description` metadata on every crate.
 - **Concurrent IPC** (`MAX_IPC_CONNECTIONS = 32`): each accepted connection is
@@ -86,7 +109,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one (it exists as a fallback; changes are re-measured on demand within
   250 ms). Measured live via the new `status` counters: 2 walks/65 s idle vs
   13 walks/65 s with a session, and the first `open` out of the idle state was
-  still placed `[measured]` within ~1 s.
+  still placed `[measured]` within ~1 s. What "idle" includes is now stated per
+  process set: a daemon that has opened a surface at least once keeps a shared
+  `WebKitNetworkProcess` resident as its child until `nexterm stop` (measured
+  0.00% of a core, ~85 MB), and its own RSS stays WebKit-initialized, so the
+  no-session floor is two processes, not one. `scripts/idle-cost.py` re-measures
+  any state on any host.
 - Terminal tracking reacted on a timer; it now reacts to events. The X11 thread
   blocks on the X11 socket and wakes on tab switches, moves, resizes and
   minimizes (`libc::poll`, 100 ms cap), so reaction measured **0–16 ms** live
