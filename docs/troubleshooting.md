@@ -144,6 +144,12 @@ the marker, then the daemon attaches by itself and the session becomes
 `Visible` — measured live: it recovered automatically the moment the duplicate
 was killed. Rename or close the impostor to clear it faster.
 
+The warning is per *occurrence*, not per session: if the duplicate comes back
+later, the surface detaches again and the warning is emitted again (once), so a
+stuck session is never left unexplained. A single warning that never repeats
+means the collision is still there — the surface cannot attach while two windows
+show the same marker.
+
 ## A `WebKitNetworkProcess` is running but I have no sessions
 
 Expected, not a leak. WebKitGTK initializes *inside the daemon* the first time a

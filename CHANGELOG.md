@@ -69,7 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outlives its shell warns exactly once, naming the tab and the
   `exit-action=hold` cause; hides need three consecutive misses (two keep the
   surface attached, which is what stops ms-flashing); a duplicate-marker
-  collision warns once per session and never attaches to a guess. They drive
+  collision warns once per occurrence (re-arming on resolve) and never attaches
+  to a guess. They drive
   the real `tick`/`confirm_lingering` paths and read the log back to assert it —
   each in a temp dir of its own, because `cargo test` runs them as parallel
   threads of one process and the log is the only record that a warning was (or
@@ -87,6 +88,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SHOWING`/`VISIBLE` (25/30) fails the build instead of silently misreporting
   visibility. The live-tree half stays a local check — a runner has no
   accessibility bus.
+- **Debian package** (`packaging/build-deb.sh`): builds
+  `nexterm_<version>_<arch>.deb` with the stripped release binaries in
+  `/usr/bin` and the docs in `/usr/share/doc/nexterm`. `Depends` is computed
+  from the binaries with `dpkg-shlibdeps` rather than written by hand, so it
+  cannot drift from what the binaries actually link (verified: `libatspi` is a
+  transitive dependency of `libwebkit2gtk-4.1-0`, not a direct `NEEDED`, and is
+  correctly not declared). The package ships **no** `.desktop` file, so
+  installing NexTerm never registers it as your URL handler. Verified on the
+  reference host by extracting the package into a temp root and starting the
+  daemon from the extracted tree.
 - **Release hygiene**: `LICENSE-MIT` + `LICENSE-APACHE`, this changelog, a CI
   workflow, and `repository`/`description` metadata on every crate.
 - **Concurrent IPC** (`MAX_IPC_CONNECTIONS = 32`): each accepted connection is
@@ -150,6 +161,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A duplicate-marker collision was reported once per *session*, so a collision
+  that cleared and later came back detached the surface with no explanation for
+  the rest of that session. The warning now re-arms as soon as the marker
+  resolves back to a single window, making it once per *occurrence*: the user is
+  told again, and the re-arm cannot spam because it requires the session to have
+  resolved first. Found while writing the decision tests for it.
 - An IPC client that connected and sent nothing (or half a frame) parked the
   daemon's single-threaded IPC thread in `read_frame` indefinitely, so every
   other command queued behind it — observed live as `nexterm doctor` hanging

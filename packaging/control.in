@@ -1,0 +1,22 @@
+Source: nexterm
+Section: web
+Priority: optional
+Maintainer: Razin Shafayet <RazinShafayet2007@users.noreply.github.com>
+Homepage: https://github.com/RazinShafayet2007/nexterm
+Standards-Version: 4.6.0
+
+Package: nexterm
+Architecture: @ARCH@
+Version: @VERSION@
+Depends: @DEPENDS@
+Recommends: gnome-terminal (>= 3.44)
+Description: browser surface inside an existing terminal
+ NexTerm hosts a real WebKitGTK browser in a tab of your existing terminal
+ (GNOME Terminal on X11): the page is rendered by an ordinary WebKit window
+ which is reparented into the terminal window and follows its active tab.
+ .
+ It does not replace your terminal, does not intercept your shell, and does
+ not take over your URL handler unless you run `nexterm handler enable`.
+ .
+ Environment: Linux + X11 + GNOME Terminal. Wayland is unsupported by design,
+ and `nexterm doctor` reports that rather than failing obscurely.

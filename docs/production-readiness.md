@@ -16,7 +16,8 @@
 | Pane-host adapters (Kitty) | new (Priority 7) | `terminal-adapters`: `PaneHost` trait + Kitty `kitten @` builder/parser, XID association, injectable runner |
 | Latency instrumentation | new (Priority 8) | `core::SessionTiming` + `TermSnapshot.updated_at` + tracked-attach/visible milestones; `nexterm list` LATENCY column; `[LATENCY]` reaction logs; event-driven X11 wait + on-demand AT-SPI re-measure + measurement freshness gate (Priority E) |
 | Daemon IPC integration test | new | `crates/daemon/tests/ipc_smoke.rs`: real binary, real socket, headless, covers ping/status/0600/unknown-cmd/clean shutdown |
-| Lifecycle decision tests | new | `nexterm-daemon` tests driving the real `tick`/`confirm_lingering`: a normal close warns about nothing, a held tab warns exactly once, hides need 3 consecutive misses, a collision warns once per session and never attaches to a guess |
+| Debian package | new | `packaging/build-deb.sh` + `packaging/control.in`: stripped release binaries to `/usr/bin`, docs to `/usr/share/doc/nexterm`, `Depends` computed by `dpkg-shlibdeps`; no `.desktop` file (the URL handler stays opt-in). Built and run from an extracted temp root on the reference host |
+| Lifecycle decision tests | new | `nexterm-daemon` tests driving the real `tick`/`confirm_lingering`: a normal close warns about nothing, a held tab warns exactly once, hides need 3 consecutive misses, a collision warns once per occurrence (re-arming on resolve) and never attaches to a guess |
 
 ## Assumptions still standing on evidence, not proof
 
@@ -46,8 +47,10 @@
    unique per daemon, but two daemons can independently pick the same
    `🌐 host:port`. Association now anchors on the window we were last attached
    to (`resolve_host` → `Sticky`) instead of taking the first title match, and
-   an unanchored collision is reported (`Ambiguous` → one `WARN` per session)
-   rather than silently grabbing a guess. Single-instance-per-user still
+   an unanchored collision is reported (`Ambiguous` → one `WARN` per *occurrence*:
+   the latch re-arms once the marker resolves to a single window, so a collision
+   that clears and returns is explained again instead of detaching the surface
+   in silence) rather than silently grabbing a guess. Single-instance-per-user still
    prevents the common case. **Live-verified (P3.2):** with two
    duplicate-title windows planted, the daemon attached to nothing and logged
    one `WARN`; once the duplicates were gone it attached to its own window and
@@ -59,7 +62,7 @@ Addressed (pure helpers, unit-tested, verified live for regressions):
 
 - **Host association** (`terminal_manager::resolve_host`): returns
   `Unique`/`Sticky`/`Ambiguous`/`None`. Prefers the previously attached X11
-  window; flags a genuine title collision once per session instead of
+  window; flags a genuine title collision once per occurrence instead of
   attaching to the wrong terminal.
 - **Focus-back** (`terminal_manager::pick_focus_back`): focuses the terminal the
   surface came from, not just the first mapped window.
@@ -182,7 +185,9 @@ own RSS stays at the WebKit-initialized ~147 MB instead of dropping back to
 (~85 MB), so it costs memory, not CPU — but a daemon that has been *used* has a
 floor of two processes, not one. `nexterm stop` is clean: checked immediately
 after, no `nexterm-daemon`, `WebKitNetworkProcess` or `WebKitWebProcess`
-remains.
+remains. That floor is a deliberate trade, not an unimplemented cleanup:
+keeping the engine warm costs ~85 MB and 0.00% of a core, while releasing it
+would add roughly 2 s to the next `open` — see **ADR-008**.
 
 The first ~60 s after `nexterm start` measure higher than the steady state
 (2.33% over 30 s was observed) because startup walks and session restore run
@@ -324,6 +329,12 @@ cargo test -p nexterm-daemon --test ipc_smoke   # real daemon + real socket, hea
    importantly — states that `nexterm handler enable` changes the system
    http/https handler while active (explicit, backed up once, reversible),
    that X11 has no isolation, and that Wayland is unsupported by design.
+   A **Debian package** is built by `packaging/build-deb.sh` (release binaries,
+   stripped, `Depends` derived from them); installing it puts `nexterm` on
+   `PATH` at `/usr/bin/nexterm`, which also fixes the trap where a from-source
+   `handler enable` records an absolute path inside `target/`. Verified here by
+   extraction + running from the extracted tree; a real `dpkg -i` needs root,
+   which the reference host does not have.
 4. Kitty-protocol host adapter (the portable story) behind the same
    `SessionInfo` model — **adapter core DONE, session wiring pending.**
    `nexterm-terminal-adapters` now has a real `PaneHost` trait (`pane.rs`) and

@@ -55,6 +55,41 @@ cargo build --release
 
 ## Install
 
+Three routes. The first needs no toolchain at all; the other two build from
+source.
+
+| Route | For | Needs |
+|---|---|---|
+| `.deb` | Ubuntu 22.04 / amd64 | root, one command |
+| `cargo install` | any machine with Rust | the build prerequisites below |
+| copy binaries | an existing build | a build |
+
+### From the .deb (Ubuntu 22.04 / amd64)
+
+```bash
+sudo dpkg -i nexterm_0.1.0_amd64.deb
+nexterm doctor          # is this machine capable?
+nexterm start
+```
+
+It installs `nexterm` and `nexterm-daemon` into `/usr/bin` and depends only on
+**runtime** libraries — `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libatspi2.0-0`,
+`libsoup-3.0-0` — which any GNOME desktop already has. No Rust, no `-dev`
+packages, no sysroot. Removal is `sudo apt remove nexterm` (your config and
+sessions file are left alone).
+
+Two things the package deliberately does **not** do:
+
+- It ships **no** `.desktop` file. The URL handler stays opt-in per user
+  (`nexterm handler enable`), so installing NexTerm never changes what opens
+  your links — see [docs/security-model.md](docs/security-model.md) §5.
+- It does not enable the daemon at login. `nexterm start` is yours to run (or
+  wire into your session yourself).
+
+Build the package from a checkout with `./packaging/build-deb.sh` (it builds
+the release binaries, strips them, computes `Depends` from the binaries with
+`dpkg-shlibdeps`, and prints the result).
+
 ### Build prerequisites
 
 The browser engine links against WebKitGTK. You need its **compile-time**

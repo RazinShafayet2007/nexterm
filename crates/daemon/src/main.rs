@@ -1064,6 +1064,8 @@ impl SessionManager {
                 HostMatch::Ambiguous(_) => (None, true),
                 HostMatch::None => (None, false),
             };
+            // Reported once per *collision*, not once per session: the latch is
+            // re-armed below as soon as the marker resolves to a single window.
             if ambiguous {
                 let first_time = self
                     .sessions
@@ -1084,7 +1086,15 @@ impl SessionManager {
             match host {
                 Some(h) => {
                     if let Some(s) = self.sessions.get_mut(&id) {
-                        s.misses = 0; // host visible: any hide countdown restarts
+                        // A host here means exactly one window shows the marker,
+                        // so nothing is ambiguous any more: restart the hide
+                        // countdown *and* re-arm the collision warning. Without
+                        // the re-arm, a collision that cleared and later came
+                        // back would detach the surface in silence for the rest
+                        // of the session — the very state the warning exists to
+                        // explain.
+                        s.misses = 0;
+                        s.ambig_warned = false;
                     }
                     // Measured (AT-SPI) rects win — but only while they still
                     // describe the window. A measurement captured before the
@@ -3154,12 +3164,13 @@ mod tests {
         assert!(s.last_attach.is_none(), "a hidden surface holds no anchor");
     }
 
-    /// A duplicate marker title is reported **once per session**, and while it
-    /// lasts the session is never attached to a guess; a lone matching window
-    /// afterwards is a host again (`misses` resets). The log is the assertion:
-    /// the user sees warnings, not flags.
+    /// A duplicate marker title is reported **once per collision**: while it
+    /// lasts the session is never attached to a guess, a lone matching window
+    /// afterwards is a host again (`misses` resets), and the latch re-arms so a
+    /// later collision is explained again rather than silent. The log is the
+    /// assertion: the user sees warnings, not flags.
     #[test]
-    fn a_collision_warns_once_and_reattaches_when_it_clears() {
+    fn a_collision_warns_once_per_occurrence_and_rearms_after_it_clears() {
         let marker = "🌐 localhost:5173";
         let ctx = headless_ctx_tagged("collision");
         let views = views_with_window();
@@ -3198,6 +3209,23 @@ mod tests {
             sm.sessions.get(&1).map(|s| s.misses),
             Some(0),
             "a unique host restarts the hide countdown"
+        );
+        assert_eq!(
+            sm.sessions.get(&1).map(|s| s.ambig_warned),
+            Some(false),
+            "resolving re-arms the warning, so a later collision is not silent"
+        );
+
+        // The duplicate comes back later in the same session: that is a new
+        // event and gets its own warning (once), because a detached surface the
+        // user cannot explain is the failure this exists to prevent.
+        sm.tick(&collision, &views, &proxy, false);
+        sm.tick(&collision, &views, &proxy, false);
+        let log = log_text(&ctx);
+        assert_eq!(
+            log.matches("is shown by more than one window").count(),
+            2,
+            "one warning per occurrence, and only one:\n{log}"
         );
     }
 }

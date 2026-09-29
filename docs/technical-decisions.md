@@ -97,6 +97,56 @@
 - **Status:** adapter layer + `nexterm adapters` reporting implemented;
   wiring sessions through it is the next increment.
 
+## ADR-008 — Keep the WebKit Engine Warm While Idle
+
+- **Decision:** do **not** release WebKitGTK when the last browser surface is
+  closed. A `WebKitNetworkProcess` and the daemon's WebKit-initialized heap
+  stay resident until `nexterm stop`.
+- **Why:** the alternative buys memory and costs latency. Shutting the engine
+  down when idle would free ~85 MB (network process) plus ~100 MB of daemon RSS,
+  but the network process measures **0.00% of a core** while idle, and
+  re-initializing it puts roughly **2 s** back on the next `open` (measured:
+  `attach` 3090 ms cold vs 1027 ms warm). A browser surface that takes three
+  seconds to appear after you type `nexterm open` is the product's core promise
+  failing, so the trade is rejected.
+- **Rejected — release on idle / release after a timeout:** adds a
+  lifecycle state machine (shutdown, re-init, failure during re-init) and a
+  latency cliff, to reclaim memory that is not being burned as CPU. If users
+  complain about RSS, the intended shape is an **opt-in config**, not a change
+  to the default.
+- **Honest limits:** the resident floor means "no sessions" is not "no
+  processes", and the idle cost of a *used* daemon (daemon + network process,
+  ~147 + ~85 MB, ~1.20% of a core) is larger than that of a fresh one
+  (~45 MB, ~0.82%). Both figures and the measurement method are in
+  `docs/production-readiness.md`; `scripts/idle-cost.py` reproduces them.
+- **Status:** decided; behaviour unchanged, now stated explicitly rather than
+  implied by the absence of cleanup code.
+
+## ADR-009 — Distribution: a Debian Package *plus* the Source Build
+
+- **Decision:** ship both. `packaging/build-deb.sh` produces
+  `nexterm_<version>_amd64.deb` (+ a `-dbgsym`-free stripped pair) for
+  Ubuntu 22.04/amd64, and building from source stays documented and supported.
+- **Why:** source-only is free for us and expensive for everyone else — it
+  requires a Rust toolchain *and* the WebKitGTK `-dev` packages (root, or the
+  `scripts/sysroot-webkit.sh` workaround plus a `PKG_CONFIG_PATH` export). It
+  also breaks `nexterm handler enable`, which records `current_exe()`, so a
+  dev build pins the system's http/https handler to `target/debug/`. Installed
+  at `/usr/bin/nexterm` that path is correct, `nexterm` is on `PATH`, and the
+  install is two commands.
+- **Depends are computed, not hand-written:** `dpkg-shlibdeps` runs over the
+  staged binaries, so the field follows what the binaries actually link.
+  `libatspi2.0-0` is correctly *absent* — it has zero direct `NEEDED` entries
+  in the daemon and arrives transitively through `libwebkit2gtk-4.1-0`.
+- **Deliberately not done by the package:** it ships no `.desktop` file and
+  does not enable the daemon at login. Registering the URL handler stays an
+  explicit, reversible `nexterm handler enable`.
+- **Honest limits:** the reference host has no `sudo`, so the package is
+  verified by extraction (`dpkg-deb -x`) and by running both binaries from the
+  extracted tree — not by a real `dpkg -i` plus desktop-database update.
+  `lintian` is not installed, so there is no independent policy check, and
+  there is no CI artifact yet.
+
 ## Open Questions (for Chunk 4 / 5)
 
 1. ~~Pin exact `wry` 0.4x patch against WebKitGTK 2.50 on Jammy; confirm 4.0 vs 4.1 API.~~
