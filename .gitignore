@@ -29,3 +29,6 @@ perf.data
 perf.data.old
 lcov.info
 tarpaulin-report.html
+
+# Website (SvelteKit landing + pricing pages; has its own deps/build)
+website/
