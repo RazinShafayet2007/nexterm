@@ -108,13 +108,36 @@ fi
 echo "   $DEPENDS"
 
 SIZE_KB="$(du -sk "$PKGDIR/usr" | cut -f1)"
-# Now fill in the *computed* Depends and keep only the binary stanza: the source
-# stanza in control.in exists so dpkg-shlibdeps has one to read, and dpkg-deb
-# rejects it inside the built package.
+# Fill in the *computed* Depends, then reduce to a single paragraph: the source
+# stanza in control.in exists so dpkg-shlibdeps has one to read, but only its
+# `Source:` field is genuinely source-only. Section, Priority, Maintainer and
+# Homepage are valid — and Maintainer is *required* — in a binary control file,
+# so they must survive into the package. (They did not, until this was checked:
+# the previous version started printing at `Package:` and silently shipped a
+# package with no Maintainer at all.)
 sed -e "s/@ARCH@/$ARCH/" -e "s/@VERSION@/$VERSION/" -e "s|@DEPENDS@|$DEPENDS|" \
     packaging/control.in > "$WORK/control.final"
-awk '/^Package: /{binary=1} binary' "$WORK/control.final" \
+awk '
+    /^Source: / { next }   # the one field that belongs to the source stanza
+    /^$/        { next }   # drop the stanza separator: one paragraph only
+    { print }
+' "$WORK/control.final" \
     | sed -e "/^Version: /a Installed-Size: $SIZE_KB" > "$PKGDIR/DEBIAN/control"
+
+# The script asserts its own output instead of trusting the reader: a package
+# with no Maintainer, or with `Depends:` still unsubstituted, is malformed but
+# still builds and still installs, which is exactly how it went unnoticed.
+for field in Package Version Architecture Maintainer Depends Description; do
+    grep -q "^$field: ." "$PKGDIR/DEBIAN/control" || {
+        echo "error: DEBIAN/control has no $field field" >&2
+        cat "$PKGDIR/DEBIAN/control" >&2
+        exit 1
+    }
+done
+if grep -q '@[A-Z]*@' "$PKGDIR/DEBIAN/control"; then
+    echo "error: DEBIAN/control still contains an unsubstituted @PLACEHOLDER@" >&2
+    exit 1
+fi
 
 # dpkg wants md5sums for the files it installs (path relative to /, no ./ prefix).
 ( cd "$PKGDIR" && find usr -type f -exec md5sum {} + > DEBIAN/md5sums )

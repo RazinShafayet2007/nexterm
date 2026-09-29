@@ -24,7 +24,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libwebkit2gtk-4.1-dev libsoup-3.0-dev \
-            libatspi2.0-dev python3-gi
+            libatspi2.0-dev python3-gi \
+            dpkg-dev fakeroot
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -55,3 +56,60 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # Packaging is part of the product, not an afterthought: `nexterm handler
+      # enable` records `current_exe()`, so only an install at a stable path
+      # (/usr/bin, as this package installs it) makes the registered http/https
+      # handler point at something that survives a `cargo clean`. Building it
+      # here also means a change that breaks packaging — the version format,
+      # the binary list, a library `dpkg-shlibdeps` cannot resolve — fails CI
+      # instead of being discovered at release time.
+      #
+      # dpkg-dev (dpkg-shlibdeps) and fakeroot are build-time-only tools; they
+      # are installed above with the other apt dependencies.
+      - name: Build .deb
+        run: ./packaging/build-deb.sh
+
+      # Install it the way a user installs it, with `dpkg -i` — not by
+      # extracting the archive. This is the one step the reference dev host
+      # cannot run, having no root: `dpkg -i` is where dependency mistakes and
+      # layout mistakes surface. `apt-get -f install` resolves the Depends that
+      # dpkg-shlibdeps computed; then we assert the package is registered, so a
+      # failure cannot pass as a success.
+      - name: Install the .deb with dpkg
+        run: |
+          set -x
+          if ! sudo dpkg -i target/pkg/nexterm_*.deb; then
+            echo "::warning::dpkg -i reported unmet dependencies;"
+            echo "::warning::resolving with apt-get -f install"
+            sudo apt-get install -y -f
+          fi
+          dpkg -s nexterm | sed -n '1,8p'
+          dpkg -s nexterm >/dev/null || {
+            echo "::error::nexterm is not registered as installed"
+            exit 1
+          }
+
+      # Proves the *installed* pair works, which extraction alone cannot: the
+      # CLI must find nexterm-daemon next to itself in /usr/bin rather than in
+      # target/release. `doctor` and `version` are asserted because both were
+      # checked to exit 0 with no DISPLAY set (doctor reports "no X display
+      # reachable" and still succeeds), so a non-zero exit here is a real
+      # regression rather than an artifact of the headless runner. No daemon is
+      # started: this is about the packaged files, not a live GUI session.
+      - name: Smoke-test the installed package
+        run: |
+          set -euxo pipefail
+          test "$(command -v nexterm)" = "/usr/bin/nexterm"
+          nexterm version
+          nexterm doctor
+          nexterm help >/dev/null
+
+      # if-no-files-found: error on purpose — a green job that uploaded
+      # nothing would silently defeat the point of building the package here.
+      - name: Upload the .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexterm-deb
+          path: target/pkg/nexterm_*.deb
+          if-no-files-found: error

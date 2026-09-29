@@ -97,9 +97,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correctly not declared). The package ships **no** `.desktop` file, so
   installing NexTerm never registers it as your URL handler. Verified on the
   reference host by extracting the package into a temp root and starting the
-  daemon from the extracted tree.
+  daemon from the extracted tree, and on CI by installing it with `dpkg -i` and
+  running the packaged `version`/`doctor`/`help` — which is where the layout and
+  `Depends` mistakes would show up. CI uploads the `.deb` as a download artifact
+  on every push. The script now assembles the control file and then **asserts**
+  the result has `Package`, `Version`, `Architecture`, `Maintainer`, `Depends`
+  and `Description` and no leftover `@PLACEHOLDER@`: only `Source:` is
+  source-only, and the previous version started printing at `Package:` and
+  shipped a package with **no `Maintainer` field at all** (Section, Priority and
+  Homepage were dropped with it).
 - **Release hygiene**: `LICENSE-MIT` + `LICENSE-APACHE`, this changelog, a CI
-  workflow, and `repository`/`description` metadata on every crate.
+  workflow that also builds, installs and uploads the Debian package, and
+  `repository`/`description` metadata on every crate.
 - **Concurrent IPC** (`MAX_IPC_CONNECTIONS = 32`): each accepted connection is
   served on its own `nexterm-ipc-conn` thread, so no client can delay the
   session tick or another command. Beyond the cap a client gets an honest
@@ -161,6 +170,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Command injection via `nexterm open`** (found in a security audit): the
+  placeholder tab's shell script was built with `format!`, interpolating the
+  marker title into a single-quoted shell region. The marker is URL-derived
+  and the validator deliberately allows `'` in paths, so
+  `nexterm open "http://x/'&id&'z"` executed `id` inside the placeholder
+  shell (reproduced) — and with the URL handler enabled, any web page's link
+  could reach that path. The shell program is now a compile-time constant
+  with the marker and sleep name passed as bash positional parameters, so
+  URL-derived bytes are data, never shell syntax. Pinned by
+  `placeholder_script_executes_marker_as_data`, which runs the real script
+  under bash with the old payload as `$1`.
+- **Remote panic that poisoned the session lock**: a URL path whose 12-byte
+  truncation landed mid-codepoint (e.g. `http://x/aaaaaaaaaaaé`) panicked
+  `title_base_for_url` inside `plan_open` while it held the sessions mutex;
+  every later `open`/`status`/`list` then failed with "session lock poisoned"
+  until restart. Truncation is now char-boundary-safe.
+- **Control characters no longer pass URL validation**: raw C0, DEL and C1
+  bytes were accepted and would ride the marker into terminal title
+  sequences, listings and log lines. The validator now rejects them at the
+  single entry point both the scanner and `open` share.
+- **`nexterm-sessions.json` is written mode 0600** (was umask-dependent,
+  typically world-readable): the file holds full URLs including query
+  strings, which often carry tokens. Pre-existing looser files are tightened
+  by the next write.
 - A duplicate-marker collision was reported once per *session*, so a collision
   that cleared and later came back detached the surface with no explanation for
   the rest of that session. The warning now re-arms as soon as the marker

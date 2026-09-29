@@ -88,7 +88,11 @@ Two things the package deliberately does **not** do:
 
 Build the package from a checkout with `./packaging/build-deb.sh` (it builds
 the release binaries, strips them, computes `Depends` from the binaries with
-`dpkg-shlibdeps`, and prints the result).
+`dpkg-shlibdeps`, and prints the result). CI runs this same script on every
+push, installs the result with `dpkg -i`, runs the installed binaries, and
+uploads the `.deb` — so `nexterm-deb` on the **Actions** tab of a recent run is
+a ready-made package you can download instead of building one. (`packaging/` is
+not a release: the version in `Cargo.toml` is what the filename carries.)
 
 ### Build prerequisites
 

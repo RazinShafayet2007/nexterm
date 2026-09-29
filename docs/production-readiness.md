@@ -16,7 +16,7 @@
 | Pane-host adapters (Kitty) | new (Priority 7) | `terminal-adapters`: `PaneHost` trait + Kitty `kitten @` builder/parser, XID association, injectable runner |
 | Latency instrumentation | new (Priority 8) | `core::SessionTiming` + `TermSnapshot.updated_at` + tracked-attach/visible milestones; `nexterm list` LATENCY column; `[LATENCY]` reaction logs; event-driven X11 wait + on-demand AT-SPI re-measure + measurement freshness gate (Priority E) |
 | Daemon IPC integration test | new | `crates/daemon/tests/ipc_smoke.rs`: real binary, real socket, headless, covers ping/status/0600/unknown-cmd/clean shutdown |
-| Debian package | new | `packaging/build-deb.sh` + `packaging/control.in`: stripped release binaries to `/usr/bin`, docs to `/usr/share/doc/nexterm`, `Depends` computed by `dpkg-shlibdeps`; no `.desktop` file (the URL handler stays opt-in). Built and run from an extracted temp root on the reference host |
+| Debian package | new | `packaging/build-deb.sh` + `packaging/control.in`: stripped release binaries to `/usr/bin`, docs to `/usr/share/doc/nexterm`, `Depends` computed by `dpkg-shlibdeps`; no `.desktop` file (the URL handler stays opt-in). Built and run from an extracted temp root on the reference host; **CI** builds it on every push, installs it with `dpkg -i`, runs the installed binaries, and uploads the `.deb` as an artifact |
 | Lifecycle decision tests | new | `nexterm-daemon` tests driving the real `tick`/`confirm_lingering`: a normal close warns about nothing, a held tab warns exactly once, hides need 3 consecutive misses, a collision warns once per occurrence (re-arming on resolve) and never attaches to a guess |
 
 ## Assumptions still standing on evidence, not proof
@@ -127,10 +127,16 @@ AT-SPI *detection* likely survives there; every surface mechanism does not.
   it means NexTerm must never be relied upon to *hide* content from local
   processes.
 - IPC is UID-gated (`SO_PEERCRED`) + 0600 socket; URLs are data-only
-  (whole-string validation, scheme allowlist, length cap, no shell).
-- Placeholder argv contains only the marker + fixed words; the URL never
-  reaches a shell.
-- `pgrep -f` matching uses the unique `NEXTERM-SLEEP-<id>` token only.
+  (whole-string validation, scheme allowlist, length cap, control-character
+  rejection, no shell).
+- The placeholder's shell program is a compile-time constant; the marker and
+  sleep name enter as bash positional parameters, so URL-derived bytes are
+  never shell syntax (the pre-fix version interpolated the marker into the
+  script and allowed command injection from a crafted URL — see the security
+  model for the history).
+- Placeholder PID discovery reads `/proc/*/cmdline` and matches `argv[0]`
+  against the unique `NEXTERM-SLEEP-<id>` token.
+- `nexterm-sessions.json` is written 0600 (URLs carry query strings).
 - IME/compose input is disabled in browser windows (`set_ime_allowed(false)`)
   AND winit 0.29's XIM focus/destroy paths are vendor-patched to
   log-and-continue (`vendor/winit`, see `vendor/winit/README.nexterm.md`):
@@ -290,7 +296,7 @@ until the next 2 s AT-SPI sample landed.
 
 ```bash
 export PKG_CONFIG_PATH="$HOME/.local/share/nexterm-sysroot/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
-cargo test --workspace            # 123 tests (122 unit + 1 daemon integration), no display needed
+cargo test --workspace            # 129 tests (128 unit + 1 daemon integration), no display needed
 python3 scripts/verify-atspi-state.py   # AT-SPI constants vs. installed header + live decode (exit 0 = pass)
 python3 scripts/verify-atspi-state.py --constants-only   # the half CI runs (no desktop needed)
 python3 scripts/idle-cost.py 30      # idle CPU + exactly which processes are resident (any state)
@@ -333,8 +339,12 @@ cargo test -p nexterm-daemon --test ipc_smoke   # real daemon + real socket, hea
    stripped, `Depends` derived from them); installing it puts `nexterm` on
    `PATH` at `/usr/bin/nexterm`, which also fixes the trap where a from-source
    `handler enable` records an absolute path inside `target/`. Verified here by
-   extraction + running from the extracted tree; a real `dpkg -i` needs root,
-   which the reference host does not have.
+   extraction + running from the extracted tree on the reference host. The
+   real `dpkg -i` needs root, which that host does not have, so **CI** does it:
+   it builds the package, installs it with `dpkg -i`, asserts it is registered,
+   runs the installed `nexterm version|doctor|help`, and uploads the `.deb`.
+   That is also the only place the packaged CLI is shown to find
+   `nexterm-daemon` beside itself in `/usr/bin`.
 4. Kitty-protocol host adapter (the portable story) behind the same
    `SessionInfo` model — **adapter core DONE, session wiring pending.**
    `nexterm-terminal-adapters` now has a real `PaneHost` trait (`pane.rs`) and

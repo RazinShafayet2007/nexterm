@@ -141,11 +141,17 @@
 - **Deliberately not done by the package:** it ships no `.desktop` file and
   does not enable the daemon at login. Registering the URL handler stays an
   explicit, reversible `nexterm handler enable`.
-- **Honest limits:** the reference host has no `sudo`, so the package is
-  verified by extraction (`dpkg-deb -x`) and by running both binaries from the
-  extracted tree — not by a real `dpkg -i` plus desktop-database update.
-  `lintian` is not installed, so there is no independent policy check, and
-  there is no CI artifact yet.
+- **Verified in CI, not just on the reference host:** the workflow runs
+  `packaging/build-deb.sh`, installs the result with `dpkg -i` (resolving
+  `Depends` via `apt-get -f install` if dpkg reports anything missing), asserts
+  the package is registered, runs the *installed* `nexterm version|doctor|help`,
+  and uploads the `.deb` as a build artifact. That covers what the reference
+  host cannot, having no `sudo`: a real install, and the CLI locating
+  `nexterm-daemon` next to itself in `/usr/bin` rather than in `target/release`.
+- **Honest limits:** a desktop-database update is still not exercised, because
+  the package deliberately ships no `.desktop` file — handler registration stays
+  a runtime, per-user action. `lintian` is still not installed anywhere, so
+  there is no independent Debian-policy check.
 
 ## Open Questions (for Chunk 4 / 5)
 

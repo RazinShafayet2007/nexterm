@@ -200,25 +200,63 @@ fn cleanup_stale_placeholders(paths: &NexPaths) {
     }
 }
 
+/// The placeholder tab's entire shell program, as a **compile-time constant**.
+///
+/// Everything variable reaches this script as bash **positional parameters**
+/// (`$1` = marker title, `$2` = the sleep process's argv[0]) — never
+/// interpolated into the text: `bash -c SCRIPT NAME ARG1 ARG2` runs SCRIPT
+/// with the ARGs as `$1`, `$2`…, and a quoted `"$1"` inside `printf` is data,
+/// not code, however many quotes or `&`s it contains. (The marker is also
+/// printf's *argument* here, so a `%` in it cannot touch the format.)
+///
+/// This structure is the fix for a real command injection: the marker is
+/// URL-derived (`title_base_for_url` embeds part of the path), the URL
+/// validator deliberately allows `'` in paths, and the previous version
+/// formatted the marker into this string inside a single-quoted region — so
+/// `nexterm open "http://x/'&id&'z"` executed `id` inside the placeholder
+/// shell (reproduced and confirmed on the reference host). With the parameter
+/// form, the same URL produces a tab literally titled `🌐 x/'&id&'z` and
+/// nothing else; `placeholder_script_executes_marker_as_data` pins this by
+/// executing the real constant.
+const PLACEHOLDER_SCRIPT: &str = concat!(
+    "printf '\\033]0;%s\\007' \"$1\"; ",
+    "echo 'NexTerm browser tab — closing this tab closes the browser session.'; ",
+    "exec -a \"$2\" sleep infinity"
+);
+
+/// Argv for the placeholder-tab launch: fixed words, the script constant, then
+/// the two variable values as bash positional parameters (`$1` = marker,
+/// `$2` = sleep argv[0]; the element right after `-c` is `$0`).
+///
+/// `--title=` carries the marker as a **direct argv element** to
+/// gnome-terminal — no shell is involved on that path. Pure, so tests can
+/// assert the structure of the launch without spawning a terminal.
+fn placeholder_argv(marker: &str, id: u64) -> Vec<String> {
+    vec![
+        "--tab".to_string(),
+        format!("--title={marker}"),
+        "--".to_string(),
+        "bash".to_string(),
+        "--norc".to_string(),
+        "--noprofile".to_string(),
+        "-c".to_string(),
+        PLACEHOLDER_SCRIPT.to_string(),
+        "bash".to_string(),
+        marker.to_string(),
+        format!("{SLEEP_PREFIX}{id}"),
+    ]
+}
+
 /// Open a placeholder shell tab carrying `marker` as its stable title.
-/// The URL never appears in shell text: only the marker (hostname-derived)
-/// and fixed words reach the shell. Returns the sleep PID for liveness.
+///
+/// The shell program is [`PLACEHOLDER_SCRIPT`], a compile-time constant; the
+/// marker and the sleep name are passed as bash positional parameters, so no
+/// URL-derived byte ever becomes shell syntax. Returns the sleep PID for
+/// liveness tracking.
 fn spawn_placeholder(marker: &str, id: u64) -> Result<u32> {
     let sleep_name = format!("{SLEEP_PREFIX}{id}");
-    let script = format!(
-        "printf '\\033]0;{marker}\\007'; echo 'NexTerm browser tab — closing this tab closes the browser session.'; exec -a {sleep_name} sleep infinity"
-    );
     let mut client = Command::new("gnome-terminal")
-        .args([
-            "--tab",
-            &format!("--title={marker}"),
-            "--",
-            "bash",
-            "--norc",
-            "--noprofile",
-            "-c",
-            &script,
-        ])
+        .args(placeholder_argv(marker, id))
         .spawn()
         .context("launch gnome-terminal --tab (is GNOME Terminal installed?)")?;
     // The client exits as soon as the server has created the tab — but it is
@@ -275,13 +313,36 @@ fn is_restorable(state: SessionState) -> bool {
 
 /// Atomically write the persisted session list (temp file + rename), so a
 /// crash mid-write can never leave a truncated file.
+///
+/// The file holds the URLs of every live session — query strings and tokens
+/// included — so it is written with mode **0600**. Two steps because neither
+/// alone is sufficient: `OpenOptions::mode(0o600)` covers *new* files but is
+/// ignored when the temp file already exists, and `set_permissions` before the
+/// rename covers both the temp file and a pre-existing destination a previous
+/// (or other-umask) run may have left group/world-readable.
 fn write_persisted_sessions(path: &Path, sessions: &[PersistedSession]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let body = serde_json::to_vec_pretty(sessions).context("serialize sessions")?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &body).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)
+        .with_context(|| format!("open {}", tmp.display()))?
+        .write_all(&body)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    // Tighten whatever the rename is about to produce — the temp file (if it
+    // predated this call) and the destination (if it predates NexTerm's 0600
+    // policy). Errors here are not fatal: the data is still written correctly.
+    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     std::fs::rename(&tmp, path).with_context(|| format!("rename {}", path.display()))?;
     Ok(())
 }
@@ -2272,6 +2333,139 @@ mod tests {
     fn current_process_is_alive() {
         assert!(is_process_alive(std::process::id()));
         assert!(is_process_alive(1));
+    }
+
+    #[test]
+    fn placeholder_argv_has_no_shell_interpolation() {
+        // The marker is a hostile URL's title: quotes, command separators,
+        // substitution — all of it. The fixed shell words and the script
+        // constant must be byte-identical regardless of the marker, and the
+        // marker must appear only as `--title=` and as the positional
+        // parameter *after* the script element (`$1`), never inside the
+        // script element itself.
+        let evil = "x/'$(id)&`id`;\"a";
+        let argv = placeholder_argv(evil, 42);
+        assert_eq!(argv[7], PLACEHOLDER_SCRIPT, "script must be the constant");
+        assert!(!argv[7].contains(evil), "marker must not be in the script");
+        assert_eq!(argv[9], evil, "marker must be bash positional $1");
+        assert_eq!(argv[10], "NEXTERM-SLEEP-42", "sleep name is $2");
+        for (i, expected) in [
+            "--tab",
+            "--title=x/'$(id)&`id`;\"a",
+            "--",
+            "bash",
+            "--norc",
+            "--noprofile",
+            "-c",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(argv[i], *expected, "argv[{i}]");
+        }
+    }
+
+    #[test]
+    fn placeholder_script_executes_marker_as_data() {
+        // Runs the REAL `PLACEHOLDER_SCRIPT` under a real bash with a hostile
+        // marker as `$1` and asserts the only output is the title sequence
+        // built from that data — i.e. the marker was interpreted as bytes, not
+        // as shell syntax. This is the test that fails if anyone reverts to
+        // interpolating the marker into the script text.
+        //
+        // The script ends in `exec … sleep infinity`, so the child never
+        // exits on its own: wait_with_output would hang forever (this test
+        // originally did exactly that). Instead: stdout goes to a file, we
+        // poll for the expected content, then kill the child — after the
+        // exec, that pid *is* the sleep, which is precisely what
+        // `spawn_placeholder` reaps in production.
+        let marker = "x/'&id&'z"; // the marker that executed `id` pre-fix
+        let dir = std::env::temp_dir().join(format!("nexterm-script-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out_path = dir.join("out.bin");
+        // A marker carrying `%s` and a literal newline must also survive —
+        // the newline proves the marker stays one printf argument even
+        // though it spans what looks like two lines of script.
+        let marker_with_meta = format!("{marker}%s\nnewline-kept");
+        let mut child = std::process::Command::new("bash")
+            .arg("--norc")
+            .arg("--noprofile")
+            .arg("-c")
+            .arg(PLACEHOLDER_SCRIPT)
+            .arg("bash")
+            .arg(&marker_with_meta)
+            .arg("NEXTERM-SLEEP-999")
+            .stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::from(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&out_path)
+                    .unwrap(),
+            ))
+            .spawn()
+            .unwrap();
+        // printf ends at BEL with no newline; echo's banner follows directly.
+        let expected = format!(
+            "\u{1b}]0;{marker_with_meta}\u{7}NexTerm browser tab — closing this tab closes the browser session.\n"
+        );
+        let mut got = String::new();
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            got = std::fs::read_to_string(&out_path).unwrap_or_default();
+            if got.len() >= expected.len() {
+                break;
+            }
+        }
+        // The printf/echo half has run; the exec'd sleep must not outlive the
+        // test (and after exec, `child.id()` IS that sleep).
+        let _ = child.kill();
+        let _ = child.wait();
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
+        }
+        assert_eq!(
+            got, expected,
+            "output must be exactly title+banner: no injected command ran"
+        );
+        assert!(
+            !got.contains("uid="),
+            "no uid= leak — an injected command must not have run"
+        );
+        assert!(
+            !stderr.contains("command not found") && !stderr.contains("syntax error"),
+            "marker bytes must not become shell syntax; stderr: {stderr:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persisted_sessions_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("nexterm-sess-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nexterm-sessions.json");
+        let saved = vec![PersistedSession {
+            url: "http://localhost:5173/?token=secret".into(),
+            marker: "🌐 localhost:5173".into(),
+        }];
+
+        // Fresh write → 0600.
+        write_persisted_sessions(&path, &saved).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "fresh file must be 0600, got {mode:o}");
+
+        // A file left group/world-readable (another writer's umask) must be
+        // tightened by the next write rather than preserved.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        write_persisted_sessions(&path, &saved).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "pre-existing loose file must be tightened");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

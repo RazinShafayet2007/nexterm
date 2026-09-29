@@ -260,6 +260,17 @@ fn classify_host(host: &str) -> Option<UrlKind> {
 /// anything malformed — the detector surfaces only openable URLs.
 fn parse_candidate(candidate: &str) -> Option<DetectedUrl> {
     let candidate = trim_trailing_junk(candidate);
+    // Reject control characters outright — `char::is_control` is Unicode Cc,
+    // i.e. C0 (U+0000–U+001F), DEL (U+007F) and C1 (U+0080–U+009F) together.
+    // Raw C0/DEL were already excluded downstream by the scheme regex, the
+    // host charset and the path check between them, and C1 was likewise
+    // excluded there by accident of those charsets — but no check *said* so,
+    // and a future charset relaxation would have silently re-admitted them.
+    // This makes the rule explicit at the single entry point both the scanner
+    // and the strict `open` validator go through.
+    if candidate.chars().any(|c| c.is_control()) {
+        return None;
+    }
     if candidate.is_empty() {
         return None;
     }
@@ -525,6 +536,32 @@ mod tests {
         none("run http://localhost:99999/x");
         none("run http://localhost:0/x");
         none("run http://localhost:/x");
+    }
+
+    #[test]
+    fn control_characters_rejected_strict_and_scanner() {
+        // C0/DEL: an ESC inside a path would otherwise ride the marker into
+        // terminal title sequences (`printf '\033]0;…'`, `--title=`) and into
+        // every listing and log line.
+        assert!(
+            parse_url("http://x/a\u{1b}[2Jb").is_none(),
+            "ESC must reject"
+        );
+        assert!(parse_url("http://x/a\u{7f}b").is_none(), "DEL must reject");
+        // C1 (U+0080-U+009F, e.g. 8-bit CSI): ordinary `char`s that older
+        // charsets let through.
+        assert!(
+            parse_url("http://x/a\u{9b}2Jb").is_none(),
+            "C1 CSI must reject"
+        );
+        // The forgiving scanner is deliberately *not* strict here: it strips
+        // ANSI decorations from terminal output before scanning (that is how
+        // colored dev-server banners work), so the same text yields the plain
+        // URL — decoration removed, not executed. It never feeds a shell; the
+        // strict validator above is the `open` boundary.
+        assert_eq!(one("open http://x/a\u{1b}[2Jb now").raw, "http://x/ab");
+        // Sanity: text around a URL is unaffected.
+        assert_eq!(one("see http://x/ok end").raw, "http://x/ok");
     }
 
     // --- Terminal noise & punctuation --------------------------------------

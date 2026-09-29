@@ -294,16 +294,48 @@ pub fn marker_title(base: &str, taken: &[String]) -> String {
     }
 }
 
+/// First `max_bytes` bytes of `s`, cut at the nearest char boundary at or
+/// before the limit.
+///
+/// A naive `&s[..max_bytes]` **panics** when the cut lands inside a multi-byte
+/// character — reached with `http://x/aaaaaaaaaaaé` (12 bytes = 11 `a`s plus
+/// the first byte of `é`). The panic fired inside `plan_open` while it held
+/// the session mutex, poisoning it: every later `open`/`status`/`list` failed
+/// with "session lock poisoned" until restart. This helper is why that URL
+/// now yields a normal title instead.
+fn head_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Drop control characters (C0 *and* C1 — `char::is_control` covers both) from
+/// a string destined for a terminal title or log line.
+///
+/// The strict URL validator rejects raw C0/DEL bytes outright, so this is
+/// belt-and-braces for the title path; it exists because the marker is emitted
+/// via terminal title sequences (`printf '\033]0;…'`, `--title=`) and printed
+/// back by `nexterm list`, where an embedded escape sequence would be
+/// interpreted rather than displayed.
+fn strip_controls(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// Short human title base for a URL: `🌐 host[:port][/p…]`.
 pub fn title_base_for_url(url: &str) -> String {
     let rest = url.split("://").nth(1).unwrap_or(url);
     let mut parts = rest.splitn(2, '/');
-    let host = parts.next().unwrap_or(rest);
-    let path = parts.next().unwrap_or("");
+    let host = strip_controls(parts.next().unwrap_or(rest));
+    let path = strip_controls(parts.next().unwrap_or(""));
     let short_path = if path.is_empty() {
         String::new()
     } else if path.len() > 12 {
-        format!("/{}…", &path[..12])
+        format!("/{}…", head_bytes(&path, 12))
     } else {
         format!("/{path}")
     };
@@ -442,6 +474,30 @@ mod tests {
             title_base_for_url("https://example.com/a/very/long/path/here"),
             "🌐 example.com/a/very/long/…"
         );
+    }
+
+    #[test]
+    fn title_base_truncates_at_a_char_boundary() {
+        // Regression: the cut was `&path[..12]`, which panics when byte 12 is
+        // inside a multi-byte character. This exact input used to panic inside
+        // `plan_open` while it held the session mutex, poisoning it.
+        let m = title_base_for_url("http://x/aaaaaaaaaaaé");
+        assert_eq!(m, "🌐 x/aaaaaaaaaaa…");
+        // And the general shape: pure ASCII paths still cut at 12 bytes.
+        assert_eq!(
+            title_base_for_url("http://x/aaaaaaaaaaaabcdef"),
+            "🌐 x/aaaaaaaaaaaa…"
+        );
+    }
+
+    #[test]
+    fn title_base_strips_control_characters() {
+        // The strict validator rejects these URLs, so this is defence in
+        // depth for the title path (markers also come from persistence and
+        // future sources). C0, DEL and C1 must never reach a title.
+        let m = title_base_for_url("http://x/\u{1b}[2Ja\u{7f}b\u{9b}c");
+        assert_eq!(m, "🌐 x/[2Jabc");
+        assert!(!m.chars().any(|c| c.is_control()));
     }
 
     #[test]

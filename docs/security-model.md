@@ -38,16 +38,30 @@ and does not ask for elevated privileges.
 
 ## 4. URL handling
 
-- URLs are treated as **data**, never as shell text. The URL string never
-  appears in a shell command, a `sh -c` argument, or a placeholder process's
-  argv.
+- URLs are treated as **data**, never as shell text. The URL never appears in
+  a shell command, a `sh -c` argument, or a placeholder process's argv. The
+  placeholder's shell program is a **compile-time constant**
+  (`PLACEHOLDER_SCRIPT` in the daemon); the marker title and the sleep
+  process's name are passed as bash **positional parameters**
+  (`bash -c SCRIPT bash "$marker" "NEXTERM-SLEEP-<id>"`), so URL-derived bytes
+  are data inside the script, never shell syntax. (Before this was enforced,
+  the marker *was* interpolated into the script text and a URL such as
+  `http://x/'&id&'z` executed `id` in the placeholder shell — a real command
+  injection, reachable from a clicked link when the URL handler is enabled.
+  Fixed and pinned by `placeholder_script_executes_marker_as_data`, which
+  runs the real script under bash with that marker.)
 - Every URL is validated whole-string before use: scheme allowlist
-  (`http`/`https` only), length cap, and rejection of malformed input.
-- Placeholder tabs are spawned with a fixed argv containing only the marker
-  token and fixed words (`bash --norc -c … exec -a NEXTERM-SLEEP-<id> sleep
-  infinity`). Nothing user-controlled is interpolated into shell text.
+  (`http`/`https` only), length cap, rejection of malformed input, and
+  rejection of **control characters** (C0, DEL and C1) so an escape sequence
+  cannot ride a URL into terminal title sequences, listings or logs. URLs
+  may still contain quoting characters like `'` (legal in paths) — which is
+  exactly why the shell-text rule above is structural, not a character
+  filter.
 - Stale process lookups use the unique `NEXTERM-SLEEP-<id>` token via
-  `pgrep -f`, never a user-supplied pattern.
+  `/proc` walks that match `argv[0]` exactly against the unique
+  `NEXTERM-SLEEP-<id>` token — never a user-supplied pattern, and never
+  `pgrep -f`, whose full-command-line matching is easy to fool (and was the
+  tool that once killed an unrelated invoking shell during development).
 - No automatic browsing: navigation happens only on an explicit
   `nexterm open`, an opt-in URL-handler click, or opt-in localhost detection
   (`browser.auto_open_localhost`, default off).
@@ -106,7 +120,7 @@ windows NexTerm uses. This is the X11 security model. Therefore:
 | Path | Purpose | Contents |
 |---|---|---|
 | `~/.config/nexterm/nexterm.toml` | Config | User settings; missing file is written with defaults. |
-| `~/.local/share/nexterm/nexterm-sessions.json` | Session restore | `{url, marker}` pairs only; written atomically (temp + rename). |
+| `~/.local/share/nexterm/nexterm-sessions.json` | Session restore | `{url, marker}` pairs only; written atomically (temp + rename) with mode **0600** — the URLs include query strings, which often carry tokens. |
 | `~/.local/share/nexterm/nexterm.log` | Log | Attach/hide/focus/close decisions with session id and reason. |
 | `~/.local/share/nexterm/handler-restore.json` | Handler backup | Previous http/https handlers; exists only after `handler enable`. |
 | `~/.local/share/applications/nexterm-url-handler.desktop` | Handler entry | Exists only after `handler enable`. |
