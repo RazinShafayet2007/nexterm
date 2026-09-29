@@ -18,6 +18,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/RazinShafayet2007/nexterm"
 
 # Vendored winit 0.29.15 with a 2-line NexTerm patch: winit's XIM
 # focus/destroy paths used `.expect()` on X results, so any BadWindow

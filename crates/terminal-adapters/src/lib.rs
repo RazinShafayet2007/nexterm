@@ -5,7 +5,26 @@
 //! the current terminal, its capability flags, and its support status — so
 //! `nexterm doctor / terminals / capabilities` never claim fake embedding.
 
+pub mod kitty;
+pub mod pane;
+
+pub use kitty::{Kitty, KITTY_ID};
+pub use pane::{
+    CmdOutput, CommandRunner, PaneHandle, PaneHost, PaneInfo, PaneKind, PaneRect, PaneRequest,
+    SystemRunner,
+};
+
 use nexterm_core::{Capabilities, SupportStatus};
+
+/// Pane-host adapters for the current environment, in preference order.
+///
+/// These are the terminals that expose their *own* pane-control API (rather
+/// than the GNOME-Terminal companion path). A host appears here even when it
+/// is not detected; callers check [`PaneHost::available`] / [`PaneHost::list_panes`]
+/// and report the result honestly.
+pub fn pane_hosts() -> Vec<Box<dyn PaneHost>> {
+    vec![Box::new(Kitty::from_env())]
+}
 
 /// A detected terminal environment.
 #[derive(Debug, Clone)]
@@ -23,7 +42,9 @@ fn env_present(name: &str) -> bool {
 }
 
 fn env_get(name: &str) -> Option<String> {
-    std::env::var_os(name).and_then(|v| v.into_string().ok()).filter(|s| !s.is_empty())
+    std::env::var_os(name)
+        .and_then(|v| v.into_string().ok())
+        .filter(|s| !s.is_empty())
 }
 
 /// Detect the current terminal from environment signals (no probing, no I/O).
@@ -43,7 +64,8 @@ pub fn detect_terminal() -> DetectedTerminal {
             detail: env_get("WEZTERM_PANE").map(|p| format!("pane {p}")),
         };
     }
-    if env_present("ALACRITTY_WINDOW_ID") || env_get("TERM_PROGRAM").as_deref() == Some("Alacritty") {
+    if env_present("ALACRITTY_WINDOW_ID") || env_get("TERM_PROGRAM").as_deref() == Some("Alacritty")
+    {
         return DetectedTerminal {
             id: "alacritty",
             label: "Alacritty".to_string(),
@@ -70,7 +92,10 @@ pub fn detect_terminal() -> DetectedTerminal {
     }
     // GNOME Terminal without VTE_VERSION in env (common when launched via
     // desktop file): fall back to desktop + TERM heuristics, marked tentative.
-    if env_get("XDG_CURRENT_DESKTOP").as_deref().unwrap_or("").contains("GNOME")
+    if env_get("XDG_CURRENT_DESKTOP")
+        .as_deref()
+        .unwrap_or("")
+        .contains("GNOME")
         && env_get("TERM").as_deref() == Some("xterm-256color")
         && env_get("TERM_PROGRAM").is_none()
     {
@@ -88,7 +113,11 @@ pub fn detect_terminal() -> DetectedTerminal {
         };
     }
     if let Some(prog) = env_get("TERM_PROGRAM") {
-        let id: &'static str = if prog == "vscode" { "vscode" } else { "unknown" };
+        let id: &'static str = if prog == "vscode" {
+            "vscode"
+        } else {
+            "unknown"
+        };
         return DetectedTerminal {
             id,
             label: format!("Unknown (TERM_PROGRAM={prog})"),
@@ -155,9 +184,7 @@ pub fn capabilities_for(id: &str) -> Capabilities {
 /// Support classification per terminal id.
 pub fn support_status(id: &str) -> SupportStatus {
     match id {
-        "gnome-terminal" | "kitty" | "wezterm" | "alacritty" => {
-            SupportStatus::PartiallySupported
-        }
+        "gnome-terminal" | "kitty" | "wezterm" | "alacritty" => SupportStatus::PartiallySupported,
         "konsole" | "tmux" | "vscode" => SupportStatus::Experimental,
         _ => SupportStatus::Unsupported,
     }
@@ -187,7 +214,14 @@ mod tests {
 
     #[test]
     fn no_terminal_claims_embedding() {
-        for id in ["gnome-terminal", "kitty", "wezterm", "alacritty", "konsole", "unknown"] {
+        for id in [
+            "gnome-terminal",
+            "kitty",
+            "wezterm",
+            "alacritty",
+            "konsole",
+            "unknown",
+        ] {
             assert!(
                 !capabilities_for(id).embedded_browser,
                 "{id} must not claim embedding"
@@ -211,8 +245,18 @@ mod tests {
     }
 
     #[test]
+    fn pane_host_registry_lists_kitty() {
+        let hosts = pane_hosts();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].id(), "kitty");
+    }
+
+    #[test]
     fn support_status_is_honest() {
-        assert_eq!(support_status("gnome-terminal"), SupportStatus::PartiallySupported);
+        assert_eq!(
+            support_status("gnome-terminal"),
+            SupportStatus::PartiallySupported
+        );
         assert_eq!(support_status("unknown"), SupportStatus::Unsupported);
     }
 }

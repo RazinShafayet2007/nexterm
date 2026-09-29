@@ -3,6 +3,8 @@ name = "nexterm-daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "The NexTerm daemon: IPC server, session manager, and browser host."
 
 [[bin]]
 name = "nexterm-daemon"

@@ -66,7 +66,12 @@ impl DetectedUrl {
     /// rewritten to `localhost`; everything else is returned verbatim.
     pub fn connect_url(&self) -> String {
         if self.kind == UrlKind::Unspecified {
-            format!("{}://localhost{}{}", self.scheme, port_suffix(self.port), self.path)
+            format!(
+                "{}://localhost{}{}",
+                self.scheme,
+                port_suffix(self.port),
+                self.path
+            )
         } else {
             self.raw.clone()
         }
@@ -84,8 +89,7 @@ fn port_suffix(port: Option<u16>) -> String {
 fn scheme_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"(?i)https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,%=\-]+")
-            .expect("scheme regex")
+        Regex::new(r"(?i)https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,%=\-]+").expect("scheme regex")
     })
 }
 
@@ -200,7 +204,9 @@ fn is_hostname(host: &str) -> bool {
     host.split('.').all(|label| {
         !label.is_empty()
             && label.len() <= 63
-            && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
             && !label.starts_with('-')
             && !label.ends_with('-')
     })
@@ -216,7 +222,11 @@ fn classify_host(host: &str) -> Option<UrlKind> {
         if inner == "::1" {
             return Some(UrlKind::Loopback);
         }
-        if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.') {
+        if !inner.is_empty()
+            && inner
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
             return Some(UrlKind::Public);
         }
         return None;
@@ -278,25 +288,26 @@ fn parse_candidate(candidate: &str) -> Option<DetectedUrl> {
     }
 
     // Split host / port (careful with bracketed IPv6).
-    let (host_raw, port_raw): (&str, Option<&str>) = if let Some(stripped) = authority.strip_prefix('[') {
-        let close = stripped.find(']')?;
-        let host = &authority[..close + 2]; // include brackets
-        let after = &authority[close + 2..];
-        if after.is_empty() {
-            (host, None)
+    let (host_raw, port_raw): (&str, Option<&str>) =
+        if let Some(stripped) = authority.strip_prefix('[') {
+            let close = stripped.find(']')?;
+            let host = &authority[..close + 2]; // include brackets
+            let after = &authority[close + 2..];
+            if after.is_empty() {
+                (host, None)
+            } else {
+                let port = after.strip_prefix(':')?;
+                (host, Some(port))
+            }
+        } else if let Some(colon) = authority.rfind(':') {
+            let (h, p) = authority.split_at(colon);
+            if h.is_empty() || p.len() < 2 {
+                return None;
+            }
+            (h, Some(&p[1..]))
         } else {
-            let port = after.strip_prefix(':')?;
-            (host, Some(port))
-        }
-    } else if let Some(colon) = authority.rfind(':') {
-        let (h, p) = authority.split_at(colon);
-        if h.is_empty() || p.len() < 2 {
-            return None;
-        }
-        (h, Some(&p[1..]))
-    } else {
-        (authority, None)
-    };
+            (authority, None)
+        };
 
     let port: Option<u16> = match port_raw {
         None => None,
@@ -318,8 +329,9 @@ fn parse_candidate(candidate: &str) -> Option<DetectedUrl> {
     // `;|$\`` (command separators / substitution) always reject. Note the
     // scheme scanner already excludes whitespace, `<>"`, `\`, `;`, `|`,
     // backtick and `$`, so this check mostly guards OSC-8-supplied targets.
-    if path.contains([' ', '\t', '\n', '\r', '<', '>', '"', '\\', ';', '|', '`', '$'])
-    {
+    if path.contains([
+        ' ', '\t', '\n', '\r', '<', '>', '"', '\\', ';', '|', '`', '$',
+    ]) {
         return None;
     }
 
@@ -391,7 +403,10 @@ pub fn detect_urls(text: &str) -> Vec<DetectedUrl> {
 
 /// Convenience filter: only dev-server URLs (loopback / unspecified / LAN).
 pub fn detect_local_dev(text: &str) -> Vec<DetectedUrl> {
-    detect_urls(text).into_iter().filter(|d| d.is_local_dev()).collect()
+    detect_urls(text)
+        .into_iter()
+        .filter(|d| d.is_local_dev())
+        .collect()
 }
 
 #[cfg(test)]
@@ -516,16 +531,34 @@ mod tests {
 
     #[test]
     fn trailing_sentence_punctuation_stripped() {
-        assert_eq!(one("See http://localhost:3000.").raw, "http://localhost:3000");
-        assert_eq!(one("See http://localhost:3000, ok?").raw, "http://localhost:3000");
-        assert_eq!(one("Wow http://localhost:3000!").raw, "http://localhost:3000");
+        assert_eq!(
+            one("See http://localhost:3000.").raw,
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            one("See http://localhost:3000, ok?").raw,
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            one("Wow http://localhost:3000!").raw,
+            "http://localhost:3000"
+        );
     }
 
     #[test]
     fn parens_and_quotes_handled() {
-        assert_eq!(one("open (http://localhost:3000) now").raw, "http://localhost:3000");
-        assert_eq!(one("open \"http://localhost:3000\" now").raw, "http://localhost:3000");
-        assert_eq!(one("open 'http://localhost:3000' now").raw, "http://localhost:3000");
+        assert_eq!(
+            one("open (http://localhost:3000) now").raw,
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            one("open \"http://localhost:3000\" now").raw,
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            one("open 'http://localhost:3000' now").raw,
+            "http://localhost:3000"
+        );
         // Balanced parens inside the path survive.
         assert_eq!(
             one("see http://localhost:3000/docs(a) ok").raw,
@@ -601,8 +634,14 @@ mod tests {
 
     #[test]
     fn pipe_and_redirect_are_boundaries() {
-        assert_eq!(one("x http://example.com | cat /etc/passwd").raw, "http://example.com");
-        assert_eq!(one("x http://example.com > /tmp/pwn").raw, "http://example.com");
+        assert_eq!(
+            one("x http://example.com | cat /etc/passwd").raw,
+            "http://example.com"
+        );
+        assert_eq!(
+            one("x http://example.com > /tmp/pwn").raw,
+            "http://example.com"
+        );
     }
 
     #[test]
@@ -640,7 +679,8 @@ mod tests {
 
     #[test]
     fn duplicates_collapse_preserving_order() {
-        let v = detect_urls("a http://localhost:3000 b https://github.com c http://localhost:3000 d");
+        let v =
+            detect_urls("a http://localhost:3000 b https://github.com c http://localhost:3000 d");
         assert_eq!(v.len(), 2);
         assert_eq!(v[0].raw, "http://localhost:3000");
         assert_eq!(v[1].raw, "https://github.com");
@@ -661,7 +701,8 @@ mod tests {
 
     #[test]
     fn multiline_output_scans_fully() {
-        let text = "starting…\nlistening on http://127.0.0.1:8080\nvite on http://localhost:5173/\ndone\n";
+        let text =
+            "starting…\nlistening on http://127.0.0.1:8080\nvite on http://localhost:5173/\ndone\n";
         let v = detect_urls(text);
         assert_eq!(v.len(), 2);
     }

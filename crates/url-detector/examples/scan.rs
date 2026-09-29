@@ -8,8 +8,8 @@
 //! One line per detected URL: `<raw>  [kind]  connect=<connect_url>`.
 //! Reads stdin only — never executes anything.
 
-use std::io::Read;
 use nexterm_url_detector::detect_urls;
+use std::io::Read;
 
 fn main() {
     let mut text = String::new();
@@ -22,7 +22,16 @@ fn main() {
         return;
     }
     for u in urls {
-        let local = if u.is_local_dev() { "local-dev" } else { "public" };
-        println!("{}  [{:?}/{local}]  connect={}", u.raw, u.kind, u.connect_url());
+        let local = if u.is_local_dev() {
+            "local-dev"
+        } else {
+            "public"
+        };
+        println!(
+            "{}  [{:?}/{local}]  connect={}",
+            u.raw,
+            u.kind,
+            u.connect_url()
+        );
     }
 }

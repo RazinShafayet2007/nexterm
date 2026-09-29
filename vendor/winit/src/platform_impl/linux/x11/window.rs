@@ -543,10 +543,21 @@ impl UnownedWindow {
 
             // Try to create input context for the window.
             if let Some(ime) = event_loop.ime.as_ref() {
-                let result = ime
+                // NexTerm vendor patch: `create_context` ends in
+                // `check_errors()`, which drains ANY pending (deferred) X
+                // error on the shared connection — e.g. a BadWindow left
+                // over from a previously destroyed window. Propagating it
+                // here aborts `Window::new` entirely, so a transient,
+                // unrelated X error makes browser-window creation fail
+                // (observed live as `browser open failed … BadWindow`).
+                // NexTerm never uses IME (`set_ime_allowed(false)`), so
+                // log-and-continue instead of failing the whole window.
+                if let Err(err) = ime
                     .borrow_mut()
-                    .create_context(window.xwindow as ffi::Window, false);
-                leap!(result);
+                    .create_context(window.xwindow as ffi::Window, false)
+                {
+                    log::warn!("Failed to create input context: {err:?}");
+                }
             }
 
             // These properties must be set after mapping

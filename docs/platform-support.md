@@ -1,5 +1,9 @@
 # NexTerm Platform Support (Chunk 1 — Evidence Baseline)
 
+> Release-facing summary (statuses, feature matrix, browser engine):
+> [`support-matrix.md`](support-matrix.md). This file is the raw evidence
+> baseline those statuses are derived from.
+
 > Inspected 2026-09-22. Host: Ubuntu 22.04.5 (Jammy), kernel 6.8.0-138-generic,
 > x86_64, X11 (`XDG_SESSION_TYPE=x11`, `DISPLAY=:0`), GNOME desktop,
 > shell `bash`, `TERM=xterm-256color`, terminal **GNOME Terminal 3.44 / VTE 0.68**,

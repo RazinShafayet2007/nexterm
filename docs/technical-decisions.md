@@ -74,6 +74,29 @@
   highest-risk claims ("real browser renders JS apps", "integration is genuine")
   are proven before cross-platform adapter sprawl. Anti-overengineering rule (§30).
 
+## ADR-007 — Second Backend: Terminal Pane Adapters, Not a VS Code Companion
+
+- **Decision (Priority 7):** NexTerm's second backend is per-terminal
+  *pane-host adapters* (starting with Kitty), built on the `PaneHost` trait in
+  `nexterm-terminal-adapters` — not a VS Code webview companion.
+- **Why:** the product premise is "a browser surface inside *your existing
+  terminal*". Pane adapters extend that premise to terminals that expose their
+  own pane-control API and remove the fragile parts of the GNOME path:
+  `kitten @ ls` reports each OS window's `platform_window_id` (the real X11
+  id), so association keys on the actual window rather than a marker title, and
+  panes are created natively instead of via a `bash -c` placeholder shim.
+- **Rejected — VS Code companion:** a webview-based VS Code extension is
+  effectively a different product (extension host, marketplace distribution),
+  shifts away from the "existing terminal" premise, and overlaps VS Code's own
+  Simple Browser. `TERM_PROGRAM=vscode` stays a reported *capability*, not a
+  second product.
+- **Honest limits:** neither Kitty nor WezTerm exposes *pixel* pane geometry
+  over its control API (Kitty: ids/titles/cwd/cmdline; WezTerm: cell `size`),
+  so pixel placement still uses X11; and both are absent on the reference host,
+  so the adapter is unit- and stub-verified only until a live host exists.
+- **Status:** adapter layer + `nexterm adapters` reporting implemented;
+  wiring sessions through it is the next increment.
+
 ## Open Questions (for Chunk 4 / 5)
 
 1. ~~Pin exact `wry` 0.4x patch against WebKitGTK 2.50 on Jammy; confirm 4.0 vs 4.1 API.~~

@@ -3,6 +3,8 @@ name = "nexterm-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Command-line interface for NexTerm: browser integration for your existing terminal."
 
 [[bin]]
 name = "nexterm"

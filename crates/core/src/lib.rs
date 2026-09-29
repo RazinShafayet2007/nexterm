@@ -25,6 +25,8 @@ pub const PID_NAME: &str = "nexterm.pid";
 pub const LOG_NAME: &str = "nexterm.log";
 /// Config filename inside the config dir.
 pub const CONFIG_NAME: &str = "nexterm.toml";
+/// Persisted-sessions filename inside the data dir (restore across restarts).
+pub const SESSIONS_NAME: &str = "nexterm-sessions.json";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -40,6 +42,8 @@ pub struct NexPaths {
     pub pid_path: PathBuf,
     pub log_path: PathBuf,
     pub config_path: PathBuf,
+    /// Persisted live-session list (used when `preserve_sessions` is set).
+    pub sessions_path: PathBuf,
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -87,6 +91,7 @@ pub fn resolve_paths() -> NexPaths {
         pid_path: runtime_dir.join(PID_NAME),
         runtime_dir,
         log_path: data_dir.join(LOG_NAME),
+        sessions_path: data_dir.join(SESSIONS_NAME),
         data_dir,
         config_path: config_dir.join(CONFIG_NAME),
         config_dir,
@@ -205,7 +210,6 @@ impl SessionState {
                 | (Visible, Hidden)
                 | (Visible, Navigating)
                 | (Visible, Closing)
-                | (Hidden, Visible)
                 | (Hidden, Closing)
                 | (Navigating, Visible)
                 | (Navigating, Hidden)
@@ -229,6 +233,36 @@ impl SessionState {
     }
 }
 
+/// One browser session persisted for restore across daemon restarts.
+/// Deliberately minimal: only what is needed to reopen the tab.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistedSession {
+    /// The whole, validated `http(s)` URL that was open.
+    pub url: String,
+    /// Marker tab title at persist time (diagnostic; regenerated on restore).
+    pub marker: String,
+}
+
+/// Measured latency milestones for one session (instrumentation).
+///
+/// All durations are milliseconds since the session was created; `None` means
+/// the milestone has not happened (yet). This is what turns "it feels slow"
+/// into a number: `attach_ms` is tab-spawn + WebKit window creation,
+/// `visible_ms` adds the first reparent/placement round-trip.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTiming {
+    /// Time since the session was created.
+    pub since_open_ms: u64,
+    /// Creation → first `Attach` (placement) event sent to the GUI.
+    pub attach_ms: Option<u64>,
+    /// Creation → first time the GUI reported the surface visible.
+    pub visible_ms: Option<u64>,
+    /// Placement (`Attach`) events sent so far — one per move/resize/tab switch.
+    pub attaches: u32,
+    /// `Hide` events sent so far (marker tab not active).
+    pub hides: u32,
+}
+
 /// One browser session as reported over IPC (`list`, `status`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -239,6 +273,9 @@ pub struct SessionInfo {
     /// Active terminal title currently hosting it, if visible.
     #[serde(default)]
     pub host_title: Option<String>,
+    /// Latency milestones; absent for old payloads and until measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<SessionTiming>,
 }
 
 /// Allocate a unique, human-meaningful marker tab title for a URL.
@@ -280,6 +317,10 @@ pub fn title_base_for_url(url: &str) -> String {
 /// Daemon status payload returned over IPC (`status` / `ping`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
+    /// Whether the process answering is alive. Only a live daemon can answer
+    /// `status`, so this is derived from the answering process rather than
+    /// asserted; "stopped" vs "running but not answering IPC" is a client-side
+    /// distinction (`nexterm status`).
     pub running: bool,
     pub pid: u32,
     pub version: String,
@@ -296,6 +337,13 @@ pub struct DaemonStatus {
     /// Live browser sessions (Mission 3+; empty for old daemons).
     #[serde(default)]
     pub sessions: Vec<SessionInfo>,
+    /// AT-SPI baseline interval in effect, ms (adaptive: long while no session
+    /// exists, responsive while one does). 0 for old payloads.
+    #[serde(default)]
+    pub atspi_poll_ms: u64,
+    /// AT-SPI walks started since start-up (0 for old payloads).
+    #[serde(default)]
+    pub atspi_walks: u64,
 }
 
 /// Capability flags for a terminal (canonical model; adapters implement it).
@@ -386,7 +434,10 @@ mod tests {
 
     #[test]
     fn title_base_shortens_paths() {
-        assert_eq!(title_base_for_url("http://localhost:5173/"), "🌐 localhost:5173");
+        assert_eq!(
+            title_base_for_url("http://localhost:5173/"),
+            "🌐 localhost:5173"
+        );
         assert_eq!(
             title_base_for_url("https://example.com/a/very/long/path/here"),
             "🌐 example.com/a/very/long/…"
@@ -401,9 +452,45 @@ mod tests {
             marker: "🌐 localhost:5173".into(),
             state: SessionState::Visible,
             host_title: None,
+            timing: None,
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["id"], 7);
         assert_eq!(v["state"], "Visible");
+        // Absent timing must not appear in the payload at all.
+        assert!(v.get("timing").is_none(), "None timing must be skipped");
+    }
+
+    #[test]
+    fn session_timing_roundtrips_and_is_optional() {
+        let s = SessionInfo {
+            id: 1,
+            url: "http://localhost:5173/".into(),
+            marker: "m".into(),
+            state: SessionState::Visible,
+            host_title: Some("t".into()),
+            timing: Some(SessionTiming {
+                since_open_ms: 4200,
+                attach_ms: Some(3900),
+                visible_ms: Some(4200),
+                attaches: 2,
+                hides: 1,
+            }),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["timing"]["visible_ms"], 4200);
+        let back: SessionInfo = serde_json::from_value(v).unwrap();
+        assert_eq!(back.timing, s.timing);
+
+        // An old payload with no `timing` key still deserializes.
+        let old = serde_json::json!({
+            "id": 2,
+            "url": "http://localhost:5173/",
+            "marker": "m",
+            "state": "Hidden"
+        });
+        let parsed: SessionInfo = serde_json::from_value(old).unwrap();
+        assert!(parsed.timing.is_none());
+        assert_eq!(parsed.host_title, None);
     }
 }

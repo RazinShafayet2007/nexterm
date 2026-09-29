@@ -10,6 +10,7 @@
 //! handler, so `file://`, `javascript:` and other schemes can never load.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,7 +36,14 @@ pub enum BrowserEvent {
     /// Run engine JS in a session (back/forward/reload via history API).
     Eval { session: u64, script: String },
     /// Attach (reparent+size+map+focus) at a decided placement.
-    Attach { session: u64, parent: u32, x: i16, y: i16, w: u32, h: u32 },
+    Attach {
+        session: u64,
+        parent: u32,
+        x: i16,
+        y: i16,
+        w: u32,
+        h: u32,
+    },
     /// Unmap a session window (stays parented).
     Hide { session: u64 },
     /// Destroy a session window.
@@ -71,7 +79,10 @@ pub fn validate_open_url(raw: &str) -> Result<DetectedUrl, String> {
         return Err("empty URL — usage: nexterm open <http(s)://host[:port][/path]>".to_string());
     }
     if t.len() > MAX_OPEN_URL_LEN {
-        return Err(format!("URL too long ({} bytes, max {MAX_OPEN_URL_LEN})", t.len()));
+        return Err(format!(
+            "URL too long ({} bytes, max {MAX_OPEN_URL_LEN})",
+            t.len()
+        ));
     }
     nexterm_url_detector::parse_url(t)
         .ok_or_else(|| format!("invalid URL: {t:?} (expected http(s)://host[:port][/path])"))
@@ -111,9 +122,13 @@ pub struct BrowserManager {
 
 impl BrowserManager {
     pub fn new(views: SharedViews) -> Result<Self, String> {
-        let (conn, _) =
-            x11rb::connect(None).map_err(|e| format!("X11 connection failed: {e}"))?;
-        Ok(Self { conn, windows: HashMap::new(), by_session: HashMap::new(), views })
+        let (conn, _) = x11rb::connect(None).map_err(|e| format!("X11 connection failed: {e}"))?;
+        Ok(Self {
+            conn,
+            windows: HashMap::new(),
+            by_session: HashMap::new(),
+            views,
+        })
     }
 
     pub fn window_count(&self) -> usize {
@@ -180,16 +195,21 @@ impl BrowserManager {
             })
             .build()
             .map_err(|e| format!("could not create webview: {e}"))?;
-        unmap_window(&self.conn, xid).ok();
+        // NOTE: the window is already UNMAPPED (`.with_visible(false)`):
+        // winit does not map it and tracks its own visibility as `No`.
+        // Never map/unmap this window with raw X requests — see `attach`.
         let id = window.id();
-        self.windows.insert(id, BrowserWindow {
-            window,
-            webview,
-            session,
-            url: url.clone(),
-            visible: false,
-            last_place: None,
-        });
+        self.windows.insert(
+            id,
+            BrowserWindow {
+                window,
+                webview,
+                session,
+                url: url.clone(),
+                visible: false,
+                last_place: None,
+            },
+        );
         self.by_session.insert(session, id);
         self.sync_views();
         Ok((url, xid))
@@ -197,9 +217,14 @@ impl BrowserManager {
 
     pub fn navigate(&mut self, session: u64, raw_url: &str) -> Result<String, String> {
         let url = validate_open_url(raw_url)?.connect_url();
-        let wid = *self.by_session.get(&session).ok_or_else(|| format!("no window for session {session}"))?;
+        let wid = *self
+            .by_session
+            .get(&session)
+            .ok_or_else(|| format!("no window for session {session}"))?;
         let win = self.windows.get_mut(&wid).ok_or("window gone")?;
-        win.webview.load_url(&url).map_err(|e| format!("navigation failed: {e}"))?;
+        win.webview
+            .load_url(&url)
+            .map_err(|e| format!("navigation failed: {e}"))?;
         win.url = url.clone();
         win.window.set_title(&format!("NexTerm — {url}"));
         self.sync_views();
@@ -207,9 +232,14 @@ impl BrowserManager {
     }
 
     pub fn eval(&mut self, session: u64, script: &str) -> Result<(), String> {
-        let wid = *self.by_session.get(&session).ok_or_else(|| format!("no window for session {session}"))?;
+        let wid = *self
+            .by_session
+            .get(&session)
+            .ok_or_else(|| format!("no window for session {session}"))?;
         let win = self.windows.get(&wid).ok_or("window gone")?;
-        win.webview.evaluate_script(script).map_err(|e| format!("script failed: {e}"))?;
+        win.webview
+            .evaluate_script(script)
+            .map_err(|e| format!("script failed: {e}"))?;
         Ok(())
     }
 
@@ -218,8 +248,19 @@ impl BrowserManager {
     /// failures here mean "attached but invisible" with green logs — the
     /// exact failure this guards against. Parenthood is verified by
     /// re-querying the parent's tree.
-    pub fn attach(&mut self, session: u64, parent: u32, x: i16, y: i16, w: u32, h: u32) -> Result<bool, String> {
-        let wid = *self.by_session.get(&session).ok_or_else(|| format!("no window for session {session}"))?;
+    pub fn attach(
+        &mut self,
+        session: u64,
+        parent: u32,
+        x: i16,
+        y: i16,
+        w: u32,
+        h: u32,
+    ) -> Result<bool, String> {
+        let wid = *self
+            .by_session
+            .get(&session)
+            .ok_or_else(|| format!("no window for session {session}"))?;
         let win = self.windows.get_mut(&wid).ok_or("window gone")?;
         let place = (parent, x, y, w.min(1600), h.min(1200));
         if win.visible && win.last_place == Some(place) {
@@ -233,18 +274,42 @@ impl BrowserManager {
             .map_err(|e| format!("reparent send failed: {e:?}"))?
             .check()
             .map_err(|e| format!("reparent {xid:#x} → {parent:#x} refused: {e:?}"))?;
-        configure_window(&self.conn, xid, &ConfigureWindowAux::new().width(place.3).height(place.4))
-            .map_err(|e| format!("resize send failed: {e:?}"))?
-            .check()
-            .map_err(|e| format!("resize {xid:#x} refused: {e:?}"))?;
-        win.webview.set_bounds(wry::Rect {
-            position: wry::dpi::LogicalPosition::new(0, 0).into(),
-            size: wry::dpi::LogicalSize::new(place.3, place.4).into(),
-        }).map_err(|e| format!("bounds failed: {e}"))?;
-        map_window(&self.conn, xid)
-            .map_err(|e| format!("map send failed: {e:?}"))?
-            .check()
-            .map_err(|e| format!("map {xid:#x} refused: {e:?}"))?;
+        configure_window(
+            &self.conn,
+            xid,
+            &ConfigureWindowAux::new().width(place.3).height(place.4),
+        )
+        .map_err(|e| format!("resize send failed: {e:?}"))?
+        .check()
+        .map_err(|e| format!("resize {xid:#x} refused: {e:?}"))?;
+        win.webview
+            .set_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0, 0).into(),
+                size: wry::dpi::LogicalSize::new(place.3, place.4).into(),
+            })
+            .map_err(|e| format!("bounds failed: {e}"))?;
+        // Map via winit's OWN visibility API — never a raw XMapWindow.
+        // winit selects VisibilityChange on its windows and its
+        // `visibility_notify` handler UNMAPS any window whose tracked
+        // visibility is `No`. Since this window is created with
+        // `.with_visible(false)` (state `No`), a raw map raises
+        // VisibilityNotify and winit instantly reverts it: the window ends
+        // up permanently unmapped and the surface never shows, while this
+        // function still reports success. `set_visible(true)` moves winit to
+        // `YesWait`, which the handler settles to `Yes` without unmapping.
+        win.window.set_visible(true);
+        // Verify server-side anyway: a map that silently failed or got
+        // reverted is the "attached but invisible with green logs" failure.
+        let map_state = get_window_attributes(&self.conn, xid)
+            .map_err(|e| format!("map-state query send failed: {e:?}"))?
+            .reply()
+            .map_err(|e| format!("map-state query {xid:#x} failed: {e:?}"))?
+            .map_state;
+        if map_state == MapState::UNMAPPED {
+            return Err(format!(
+                "map {xid:#x} reverted: window still unmapped after set_visible(true)"
+            ));
+        }
         // NOTE: no winit `focus_window()` here — it drives the XIM focus path
         // and panics with BadWindow on reparented windows (daemon killer).
         // Plain XSetInputFocus is the proven, non-panicking path.
@@ -256,7 +321,9 @@ impl BrowserManager {
             .map(|t| t.children.contains(&xid))
             .unwrap_or(false);
         if !confirmed {
-            return Err(format!("reparent unverified: {xid:#x} not listed under {parent:#x}"));
+            return Err(format!(
+                "reparent unverified: {xid:#x} not listed under {parent:#x}"
+            ));
         }
         win.visible = true;
         win.last_place = Some(place);
@@ -266,12 +333,19 @@ impl BrowserManager {
 
     /// Hide: unmap (stays parented). Verified by the caller via viewability.
     pub fn hide(&mut self, session: u64) -> Result<bool, String> {
-        let wid = *self.by_session.get(&session).ok_or_else(|| format!("no window for session {session}"))?;
+        let wid = *self
+            .by_session
+            .get(&session)
+            .ok_or_else(|| format!("no window for session {session}"))?;
         let win = self.windows.get_mut(&wid).ok_or("window gone")?;
         if !win.visible {
             return Ok(false);
         }
-        unmap_window(&self.conn, Self::our_xid(&win.window)).ok();
+        // Unmap through winit's visibility API (see `attach`): a raw
+        // XUnmapWindow leaves winit's tracked state at `Yes`, so winit and
+        // the raw path disagree; `set_visible(false)` keeps winit
+        // authoritative and consistent for the next `attach`.
+        win.window.set_visible(false);
         win.visible = false;
         self.sync_views();
         Ok(true)
@@ -281,7 +355,7 @@ impl BrowserManager {
     pub fn close_session(&mut self, session: u64) {
         if let Some(wid) = self.by_session.remove(&session) {
             if let Some(win) = self.windows.remove(&wid) {
-                unmap_window(&self.conn, Self::our_xid(&win.window)).ok();
+                win.window.set_visible(false);
             }
         }
         self.sync_views();
@@ -316,11 +390,14 @@ impl BrowserManager {
             views.clear();
             for (sid, wid) in &self.by_session {
                 if let Some(win) = self.windows.get(wid) {
-                    views.insert(*sid, SessionView {
-                        url: win.url.clone(),
-                        visible: win.visible,
-                        has_window: true,
-                    });
+                    views.insert(
+                        *sid,
+                        SessionView {
+                            url: win.url.clone(),
+                            visible: win.visible,
+                            has_window: true,
+                        },
+                    );
                 }
             }
         }
@@ -336,6 +413,10 @@ pub struct GuiContext {
     event_loop: Option<EventLoop<BrowserEvent>>,
     proxy: EventLoopProxy<BrowserEvent>,
     views: SharedViews,
+    /// Set once the GUI event loop is actually pumping, i.e. `send_event`
+    /// will be delivered instead of failing with "event loop is not running".
+    /// Lets the daemon wait before doing work that injects events (restore).
+    ready: Arc<AtomicBool>,
 }
 
 impl GuiContext {
@@ -346,6 +427,11 @@ impl GuiContext {
 
     pub fn views(&self) -> SharedViews {
         Arc::clone(&self.views)
+    }
+
+    /// Shared flag flipped to `true` once the GUI loop is running.
+    pub fn ready(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.ready)
     }
 }
 
@@ -361,8 +447,11 @@ pub fn init_gui(views: SharedViews) -> Result<GuiContext, String> {
     if let Some(display) = gtk::gdk::Display::default() {
         use gtk::prelude::DisplayExtManual;
         if display.backend().is_wayland() {
-            return Err("Wayland compositor detected — the wry X11 webview backend needs \
-                 X11 (run under XWayland or an Xorg session)".to_string());
+            return Err(
+                "Wayland compositor detected — the wry X11 webview backend needs \
+                 X11 (run under XWayland or an Xorg session)"
+                    .to_string(),
+            );
         }
     }
 
@@ -375,23 +464,53 @@ pub fn init_gui(views: SharedViews) -> Result<GuiContext, String> {
     let event_loop = EventLoop::<BrowserEvent>::with_user_event()
         .map_err(|e| format!("could not create GUI event loop (no display?): {e}"))?;
     let proxy = event_loop.create_proxy();
-    Ok(GuiContext { event_loop: Some(event_loop), proxy, views })
+    Ok(GuiContext {
+        event_loop: Some(event_loop),
+        proxy,
+        views,
+        ready: Arc::new(AtomicBool::new(false)),
+    })
 }
+
+/// How often the GTK/WebKit pump runs **while a browser window exists**.
+///
+/// GTK sources (the webview's X events, WebKit's timers and paints) only run
+/// inside `gtk::main_iteration_do`, and winit's wait does not watch GTK's own
+/// connections — so a window needs a bounded periodic pump or the first
+/// click/keystroke in the page waits for the next wakeup. 16 ms keeps that
+/// imperceptible; measured cost is ~3% of one core with a window open, ~0% with
+/// none (see `ControlFlow` below).
+const PUMP_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Run the GUI event loop (blocks until [`BrowserEvent::Shutdown`]).
 /// `log` receives human log lines for the daemon log file.
 pub fn run_gui(mut ctx: GuiContext, log: impl Fn(&str) + 'static) -> Result<(), String> {
-    let event_loop = ctx.event_loop.take().expect("run_gui called with consumed GuiContext");
+    let event_loop = ctx
+        .event_loop
+        .take()
+        .expect("run_gui called with consumed GuiContext");
     let mut manager = BrowserManager::new(Arc::clone(&ctx.views))
         .map_err(|e| format!("browser manager failed: {e}"))?;
+    let ready = Arc::clone(&ctx.ready);
 
     event_loop
         .run(move |event, target| {
-            // Cap the pump at ~60Hz AND bound each drain: under a GTK event
-            // flood (WebKit timers, reparent storms) an unbounded drain
-            // starves winit user-events forever — the loop looks alive while
-            // ignoring Open/Attach/Close. Bounded drain guarantees dispatch.
-            target.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16)));
+            // The loop is live: proxies may now deliver events.
+            ready.store(true, Ordering::SeqCst);
+            // Idle cost: with NO browser window there is nothing for GTK to
+            // service, so block until an actual event (a user event such as
+            // `Open` wakes the loop through the proxy). With a window, cap the
+            // pump at ~60Hz.
+            //
+            // Either way the drain is BOUNDED: under a GTK event flood (WebKit
+            // timers, reparent storms) an unbounded drain starves winit
+            // user-events forever — the loop looks alive while ignoring
+            // Open/Attach/Close. Bounded drain guarantees dispatch.
+            target.set_control_flow(if manager.window_count() == 0 {
+                ControlFlow::Wait
+            } else {
+                ControlFlow::WaitUntil(Instant::now() + PUMP_INTERVAL)
+            });
             for _ in 0..50 {
                 if !gtk::events_pending() {
                     break;
@@ -401,31 +520,50 @@ pub fn run_gui(mut ctx: GuiContext, log: impl Fn(&str) + 'static) -> Result<(), 
             match event {
                 Event::UserEvent(BrowserEvent::Open { session, url }) => {
                     match manager.open_session(target, session, &url) {
-                        Ok((u, xid)) => log(&format!("Browser window created for session {session} → {u} (xid={xid:#x})")),
-                        Err(e) => log(&format!("ERROR browser open failed (session {session}): {e}")),
+                        Ok((u, xid)) => log(&format!(
+                            "Browser window created for session {session} → {u} (xid={xid:#x})"
+                        )),
+                        Err(e) => log(&format!(
+                            "ERROR browser open failed (session {session}): {e}"
+                        )),
                     }
                 }
                 Event::UserEvent(BrowserEvent::Navigate { session, url }) => {
                     match manager.navigate(session, &url) {
                         Ok(u) => log(&format!("Browser session {session} navigated → {u}")),
-                        Err(e) => log(&format!("ERROR browser navigate failed (session {session}): {e}")),
+                        Err(e) => log(&format!(
+                            "ERROR browser navigate failed (session {session}): {e}"
+                        )),
                     }
                 }
                 Event::UserEvent(BrowserEvent::Eval { session, script }) => {
                     if let Err(e) = manager.eval(session, &script) {
-                        log(&format!("ERROR browser script failed (session {session}): {e}"));
+                        log(&format!(
+                            "ERROR browser script failed (session {session}): {e}"
+                        ));
                     }
                 }
-                Event::UserEvent(BrowserEvent::Attach { session, parent, x, y, w, h }) => {
-                    match manager.attach(session, parent, x, y, w, h) {
-                        Ok(true) => log(&format!("Browser session {session} attached to {parent:#x}")),
-                        Ok(false) => {}
-                        Err(e) => log(&format!("ERROR browser attach failed (session {session}): {e}")),
-                    }
-                }
+                Event::UserEvent(BrowserEvent::Attach {
+                    session,
+                    parent,
+                    x,
+                    y,
+                    w,
+                    h,
+                }) => match manager.attach(session, parent, x, y, w, h) {
+                    Ok(true) => log(&format!(
+                        "Browser session {session} attached to {parent:#x}"
+                    )),
+                    Ok(false) => {}
+                    Err(e) => log(&format!(
+                        "ERROR browser attach failed (session {session}): {e}"
+                    )),
+                },
                 Event::UserEvent(BrowserEvent::Hide { session }) => {
                     if let Err(e) = manager.hide(session) {
-                        log(&format!("ERROR browser hide failed (session {session}): {e}"));
+                        log(&format!(
+                            "ERROR browser hide failed (session {session}): {e}"
+                        ));
                     }
                 }
                 Event::UserEvent(BrowserEvent::CloseSession { session }) => {
@@ -435,10 +573,16 @@ pub fn run_gui(mut ctx: GuiContext, log: impl Fn(&str) + 'static) -> Result<(), 
                 Event::UserEvent(BrowserEvent::Shutdown) => {
                     target.exit();
                 }
-                Event::WindowEvent { window_id, event: WindowEvent::Resized(_), .. } => {
-                    manager.sync_bounds(window_id)
-                }
-                Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. } => {
+                Event::WindowEvent {
+                    window_id,
+                    event: WindowEvent::Resized(_),
+                    ..
+                } => manager.sync_bounds(window_id),
+                Event::WindowEvent {
+                    window_id,
+                    event: WindowEvent::CloseRequested,
+                    ..
+                } => {
                     manager.window_closed(window_id);
                     log("WARN a browser window was closed outside the session manager");
                 }

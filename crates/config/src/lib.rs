@@ -107,10 +107,8 @@ pub fn load(path: &std::path::Path) -> Result<Config> {
         save(&cfg, path)?;
         return Ok(cfg);
     }
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let cfg: Config =
-        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let cfg: Config = toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
     Ok(cfg)
 }
 

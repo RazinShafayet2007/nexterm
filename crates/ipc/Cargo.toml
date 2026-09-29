@@ -3,6 +3,8 @@ name = "nexterm-ipc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Unix-domain-socket JSON IPC transport for NexTerm."
 
 [dependencies]
 nexterm-core = { path = "../core" }

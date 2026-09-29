@@ -10,7 +10,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use nexterm_core::{MAX_FRAME_BYTES, Request, Response, resolve_paths};
+use nexterm_core::{resolve_paths, Request, Response, MAX_FRAME_BYTES};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RW_TIMEOUT: Duration = Duration::from_secs(5);
@@ -20,7 +20,15 @@ pub fn socket_path() -> std::path::PathBuf {
     resolve_paths().socket_path
 }
 
-fn set_timeouts(stream: &UnixStream) -> Result<()> {
+/// Bound every read and write on a connection (`RW_TIMEOUT`).
+///
+/// The **server** must apply this too, not only the client: `accept()` hands
+/// over whatever the peer sent (possibly nothing), and with no read deadline a
+/// single stalled client blocks the daemon's IPC thread — and with it every
+/// other command (`ping`, `status`, `doctor`) — until that client goes away.
+/// The control plane must always make progress; a stalled peer now costs at
+/// most one timeout.
+pub fn set_stream_timeouts(stream: &UnixStream) -> Result<()> {
     stream
         .set_read_timeout(Some(RW_TIMEOUT))
         .context("set read timeout")?;
@@ -89,7 +97,7 @@ pub fn request(cmd: &str, args: serde_json::Value) -> Result<Response> {
     let addr: &std::path::Path = &path;
     let mut stream = UnixStream::connect(addr)
         .with_context(|| format!("connect to daemon at {}", path.display()))?;
-    set_timeouts(&stream)?;
+    set_stream_timeouts(&stream)?;
     // Connect timeout is approximated by the RW timeouts (Unix sockets connect
     // fast locally); keep a hard bound via the read timeout above.
     let _ = CONNECT_TIMEOUT;
@@ -111,12 +119,8 @@ pub fn ping() -> bool {
 /// Bind the daemon socket, removing a stale file first. Sets 0600 perms.
 pub fn bind_server() -> Result<UnixListener> {
     let paths = resolve_paths();
-    std::fs::create_dir_all(&paths.runtime_dir).with_context(|| {
-        format!(
-            "create runtime dir {}",
-            paths.runtime_dir.display()
-        )
-    })?;
+    std::fs::create_dir_all(&paths.runtime_dir)
+        .with_context(|| format!("create runtime dir {}", paths.runtime_dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -130,12 +134,8 @@ pub fn bind_server() -> Result<UnixListener> {
             let _ = std::fs::remove_file(&paths.socket_path);
         }
     }
-    let listener = UnixListener::bind(&paths.socket_path).with_context(|| {
-        format!(
-            "bind daemon socket {}",
-            paths.socket_path.display()
-        )
-    })?;
+    let listener = UnixListener::bind(&paths.socket_path)
+        .with_context(|| format!("bind daemon socket {}", paths.socket_path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

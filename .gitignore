@@ -1,1 +1,31 @@
+# Build artifacts (workspace + standalone research crates)
 /target/
+research/*/target/
+vendor/winit/target/
+
+# Rust incremental artifacts that sometimes escape target/
+**/*.d
+**/*.rlib
+**/*.rmeta
+
+# Logs and local runtime state (never commit)
+*.log
+*.xwd
+*.png
+# ...except assets that belong to the vendored dependency
+!vendor/winit/examples/icon.png
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Profiling / coverage
+perf.data
+perf.data.old
+lcov.info
+tarpaulin-report.html

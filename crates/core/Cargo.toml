@@ -3,6 +3,8 @@ name = "nexterm-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Shared types, commands, status models, and XDG path resolution for NexTerm."
 
 [dependencies]
 serde = { workspace = true }
